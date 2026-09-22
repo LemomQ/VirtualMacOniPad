@@ -17,43 +17,50 @@
 #   internet. This deliberately distinguishes "guest-side state is stale" from
 #   "the iPad itself is offline": if the iPad has no uplink but the link is
 #   healthy, the gateway still answers and we do nothing.
+#   Once a probe fails, polling speeds up so a real outage is confirmed in
+#   about a second instead of a full interval per probe.
 #
 # Repair ladder (cheapest first, stops as soon as the gateway answers):
 #   1. flush the stale ARP entry and force a re-probe
 #   2. renew the DHCP lease   (same as System Settings > Renew DHCP Lease)
-#   3. bounce the interface   (link layer restart plus a renew)
+#   3. bounce the interface   (link layer restart plus a fresh discover)
 #   4. toggle the network service (same as the manual adapter off/on)
 #
-#   Every step waits for the gateway to come back before the next one runs.
-#   Fixed sleeps used to declare a repair failed while DHCP was still in
-#   progress, which escalated to a disruptive step for no reason and could
-#   leave the reported state wrong.
+#   Every step waits for the gateway to come back before the next one runs, and
+#   records how long it took, so a slow recovery can be attributed to a
+#   specific step instead of guessed at. Confirming a step costs a probe, and a
+#   probe that gets no answer is not cheap, so the ladder only pays for the
+#   confirmations that can actually change the outcome.
 #
 # Optional config file: /Library/VirtualMac/network-watchdog.conf
-#   INTERVAL=3          seconds between health checks
-#   FAILS=3             consecutive failures before repairing
+#   INTERVAL=2          seconds between health checks while healthy
+#   FAILS=2             consecutive failures before repairing
 #   INTERFACE=en0       force an interface (default: autodetect)
 #   SAFETY_RENEW=0      seconds between unconditional DHCP renews (0 = off)
 #   MAX_BACKOFF=60      slowest retry interval after repeated failures
-#   ARP_WAIT=2          seconds to wait after flushing ARP
-#   RENEW_WAIT=4        seconds to wait after a DHCP renew
-#   BOUNCE_WAIT=10      seconds to wait after bouncing the interface
-#   SERVICE_WAIT=10     seconds to wait after toggling the network service
+#   PING_WAIT=200       milliseconds to wait for a probe reply
+#   RENEW_WAIT=1        seconds to wait after a DHCP renew
+#   BOUNCE_WAIT=15      seconds to wait after bouncing the interface
+#   SERVICE_WAIT=15     seconds to wait after toggling the network service
+#   FRESH_DISCOVER=1    clear the address before renewing after a bounce, so
+#                       the client runs a fresh DHCP discover instead of a
+#                       renew aimed at a server that may be unreachable
 
 set -u
 
 CONFIG=/Library/VirtualMac/network-watchdog.conf
 LOG=/var/log/virtualmac-network-watchdog.log
 
-INTERVAL=3
-FAILS=3
+INTERVAL=2
+FAILS=2
 INTERFACE=""
 SAFETY_RENEW=0
 MAX_BACKOFF=60
-ARP_WAIT=2
-RENEW_WAIT=4
-BOUNCE_WAIT=10
-SERVICE_WAIT=10
+PING_WAIT=200
+RENEW_WAIT=1
+BOUNCE_WAIT=15
+SERVICE_WAIT=15
+FRESH_DISCOVER=1
 
 if [ -r "$CONFIG" ]; then
     # shellcheck disable=SC1090
@@ -66,8 +73,16 @@ fi
 # the last-resort step exactly when it was needed.
 SERVICE=""
 
+# Start of the repair in progress, for the step timings written to the log.
+REPAIR_START=0
+
 log() {
     printf '%s %s\n' "$(/bin/date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null
+}
+
+# Whole seconds since the current repair began.
+elapsed() {
+    printf '%s' "$(( $(/bin/date +%s) - REPAIR_START ))"
 }
 
 # Interface carrying the default route, falling back to the first usable en*.
@@ -95,10 +110,44 @@ gateway() {
         /usr/bin/awk '/gateway:/{print $2; exit}'
 }
 
+# IPv4 address of $1, if it currently has one.
+address_of() {
+    /usr/sbin/ipconfig getifaddr "$1" 2>/dev/null
+}
+
 healthy() {
     g=$(gateway)
     [ -n "${g:-}" ] || return 1
-    /sbin/ping -c 1 -W 800 -q "$g" >/dev/null 2>&1
+    # A probe that gets no answer costs about a second in ARP resolution no
+    # matter how long the reply timeout is, so the timeout only adds to it: an
+    # unreachable gateway took 1.8s at 800ms but 1.1s at 100ms. A gateway on the
+    # local link answers in milliseconds, so keep it short.
+    /sbin/ping -c 1 -W "$PING_WAIT" -q "$g" >/dev/null 2>&1
+}
+
+# Start a DHCP transaction without waiting for it.
+#
+# ipconfig blocks until configd finishes or gives up on the exchange, and on a
+# network where the exchange cannot succeed that is several seconds of dead
+# time. configd performs the transaction itself, so the caller can stop waiting
+# without cancelling it.
+start_dhcp() {
+    /usr/sbin/ipconfig set "$1" DHCP >/dev/null 2>&1 &
+    DHCP_PID=$!
+}
+
+# Stop waiting for the transaction started by start_dhcp.
+#
+# ipconfig does not exit promptly on SIGTERM, so a plain kill would leave the
+# caller waiting. SIGKILL cannot be ignored. The exit status is not needed here,
+# and waiting on a command that may be blocked in the kernel could stall the
+# ladder all over again, so the process is killed but not waited for. The shell
+# reaps it when it dies.
+stop_waiting_for_dhcp() {
+    if [ -n "${DHCP_PID:-}" ]; then
+        /bin/kill -9 "$DHCP_PID" 2>/dev/null
+        DHCP_PID=""
+    fi
 }
 
 # Wait up to $1 seconds for the gateway to answer again.
@@ -146,25 +195,62 @@ repair() {
         return 1
     fi
 
-    # 1. Drop stale ARP state and force a fresh resolution. Cheap, and it does
-    #    not disturb connections that are still working.
+    REPAIR_START=$(/bin/date +%s)
+    old_address=$(address_of "$i")
+    log "  +$(elapsed)s begin (iface=$i address=${old_address:-none})"
+
+    # 1. Drop stale ARP state and force a fresh resolution. This is free, and it
+    #    has never been observed to be sufficient on its own, so it is not worth
+    #    a probe to confirm: the renew step below checks the result anyway.
     g=$(gateway)
     [ -n "${g:-}" ] && /usr/sbin/arp -d "$g" 2>/dev/null
     /usr/sbin/arp -d -a 2>/dev/null
-    wait_for_gateway "$ARP_WAIT" && return 0
+    log "  +$(elapsed)s arp flushed"
 
     # 2. Renew the lease: refreshes address, router and DNS configuration.
-    /usr/sbin/ipconfig set "$i" DHCP 2>/dev/null
-    wait_for_gateway "$RENEW_WAIT" && return 0
+    start_dhcp "$i"
+    log "  +$(elapsed)s renew started"
+    wait_for_gateway "$RENEW_WAIT" && {
+        log "  +$(elapsed)s renew wait finished (gateway up)"
+        stop_waiting_for_dhcp
+        log "  +$(elapsed)s renew command released"
+        return 0
+    }
+    stop_waiting_for_dhcp
+    log "  +$(elapsed)s renew insufficient"
 
     # 3. Bounce the interface. After the host moves to a different subnet this
-    #    is the step that actually recovers the guest, and the DHCP exchange it
-    #    triggers can take several seconds, so wait before judging it failed.
+    #    is the step that actually recovers the guest: the old lease belongs to
+    #    a network that is gone, so a renew cannot help and the client has to
+    #    acquire a new one.
     /sbin/ifconfig "$i" down 2>/dev/null
     /bin/sleep 1
     /sbin/ifconfig "$i" up 2>/dev/null
-    /usr/sbin/ipconfig set "$i" DHCP 2>/dev/null
-    wait_for_gateway "$BOUNCE_WAIT" && return 0
+    if [ "${FRESH_DISCOVER:-0}" -gt 0 ]; then
+        /usr/sbin/ipconfig set "$i" NONE 2>/dev/null
+    fi
+    start_dhcp "$i"
+    log "  +$(elapsed)s bounced (address was ${old_address:-none})"
+
+    bounce_left=$BOUNCE_WAIT
+    lease_changed=0
+    while [ "$bounce_left" -gt 0 ]; do
+        current_address=$(address_of "$i")
+        if [ "$lease_changed" -eq 0 ] && [ -n "${current_address:-}" ] &&
+            [ "$current_address" != "$old_address" ]; then
+            lease_changed=1
+            log "  +$(elapsed)s lease ${old_address:-none} -> $current_address"
+        fi
+        healthy && {
+            stop_waiting_for_dhcp
+            log "  +$(elapsed)s gateway answered (address=${current_address:-none})"
+            return 0
+        }
+        /bin/sleep 1
+        bounce_left=$((bounce_left - 1))
+    done
+    stop_waiting_for_dhcp
+    healthy && return 0
 
     # 4. Last resort: toggle the network service. This is the scripted form of
     #    the "disable the adapter, then enable it" workaround, and it rebuilds
@@ -174,9 +260,14 @@ repair() {
         /usr/sbin/networksetup -setnetworkserviceenabled "$SERVICE" off 2>/dev/null
         /bin/sleep 2
         /usr/sbin/networksetup -setnetworkserviceenabled "$SERVICE" on 2>/dev/null
-        /usr/sbin/ipconfig set "$i" DHCP 2>/dev/null
-        wait_for_gateway "$SERVICE_WAIT"
-        return $?
+        start_dhcp "$i"
+        wait_for_gateway "$SERVICE_WAIT" && {
+            stop_waiting_for_dhcp
+            log "  +$(elapsed)s gateway answered after the service toggle"
+            return 0
+        }
+        stop_waiting_for_dhcp
+        return 1
     fi
     log "escalating: no network service name cached; cannot toggle it"
     return 1
@@ -187,7 +278,7 @@ boot_gateway=$(gateway)
 if [ -n "$boot_iface" ]; then
     SERVICE=$(resolve_service "$boot_iface")
 fi
-log "watchdog started (interval=${INTERVAL}s fails=${FAILS} iface=${boot_iface} gateway=${boot_gateway} service=${SERVICE})"
+log "watchdog started (interval=${INTERVAL}s fails=${FAILS} iface=${boot_iface} gateway=${boot_gateway} service=${SERVICE} fresh=${FRESH_DISCOVER})"
 
 failures=0
 backoff=0
@@ -242,9 +333,21 @@ while :; do
         if [ $((now - last_safety)) -ge "$SAFETY_RENEW" ]; then
             last_safety=$now
             i=$(iface)
-            [ -n "${i:-}" ] && /usr/sbin/ipconfig set "$i" DHCP 2>/dev/null
+            if [ -n "${i:-}" ]; then
+                # Give the request time to reach configd before giving up on
+                # the command; the transaction itself outlives it.
+                start_dhcp "$i"
+                /bin/sleep 1
+                stop_waiting_for_dhcp
+            fi
         fi
     fi
 
-    /bin/sleep $((INTERVAL + backoff))
+    # Probe faster once something has failed: a real outage is then confirmed in
+    # about a second per probe instead of a whole interval.
+    if [ "$failures" -gt 0 ]; then
+        /bin/sleep 1
+    else
+        /bin/sleep $((INTERVAL + backoff))
+    fi
 done
