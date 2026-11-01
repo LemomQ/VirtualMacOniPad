@@ -143,6 +143,7 @@
 "Learn More" = "מידע נוסף";
 "Library Appearance" = "מראה הספרייה";
 "Loading extracted Apple virtualization frameworks…" = "ה-frameworks של Apple לווירטואליזציה שחולצו נטענים…";
+"Lock Pointer to Display" = "נעילת המצביע על המסך";
 "MAC Address" = "כתובת MAC";
 "Mac Keyboard" = "מקלדת Mac";
 "Mac Keyboard Shortcuts" = "קיצורי מקשים של Mac";
@@ -271,6 +272,7 @@
 "Touch" = "מגע";
 "Touch and Hold Right Click" = "לחיצה ממושכת כלחיצה ימנית";
 "Touch and Hold to Secondary Click" = "גע והחזק ללחיצה משנית";
+"Trackpad Scrolling Speed" = "מהירות גלילה של משטח העקיבה";
 "Turn Off Virtual Mac Guest Tools?" = "לכבות את כלי האורח של Virtual Mac?";
 "Two Finger Tap Right Click" = "הקשה בשתי אצבעות כלחיצה ימנית";
 "Two Finger Tap to Secondary Click" = "הקשה בשתי אצבעות ללחיצה משנית";

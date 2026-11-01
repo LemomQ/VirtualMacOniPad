@@ -143,6 +143,7 @@
 "Learn More" = "Tìm hiểu thêm";
 "Library Appearance" = "Giao diện thư viện";
 "Loading extracted Apple virtualization frameworks…" = "Đang tải các framework ảo hóa Apple đã trích xuất…";
+"Lock Pointer to Display" = "Khóa con trỏ vào màn hình";
 "MAC Address" = "Địa chỉ MAC";
 "Mac Keyboard" = "Bàn phím Mac";
 "Mac Keyboard Shortcuts" = "Phím tắt Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Cảm ứng";
 "Touch and Hold Right Click" = "Chạm và giữ để nhấp chuột phải";
 "Touch and Hold to Secondary Click" = "Chạm và giữ cho lần nhấp phụ";
+"Trackpad Scrolling Speed" = "Tốc độ cuộn bàn di chuột";
 "Turn Off Virtual Mac Guest Tools?" = "Tắt công cụ máy khách Virtual Mac?";
 "Two Finger Tap Right Click" = "Chạm hai ngón để nhấp chuột phải";
 "Two Finger Tap to Secondary Click" = "Nhấn bằng hai ngón tay để nhấp chuột phụ";

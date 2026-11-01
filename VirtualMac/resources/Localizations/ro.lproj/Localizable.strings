@@ -143,6 +143,7 @@
 "Learn More" = "Aflați mai multe";
 "Library Appearance" = "Aspetto biblioteca";
 "Loading extracted Apple virtualization frameworks…" = "Caricamento dei framework di virtualizzazione Apple estratti…";
+"Lock Pointer to Display" = "Blochează cursorul pe ecran";
 "MAC Address" = "Adresă MAC";
 "Mac Keyboard" = "Tastatură Mac";
 "Mac Keyboard Shortcuts" = "Comenzi rapide de la tastatură Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Atingere";
 "Touch and Hold Right Click" = "Ține apăsat pentru clic dreapta";
 "Touch and Hold to Secondary Click" = "Atingeți și mențineți apăsat pentru clic secundar";
+"Trackpad Scrolling Speed" = "Viteza derulării trackpadului";
 "Turn Off Virtual Mac Guest Tools?" = "Dezactivați instrumentele pentru oaspeți Virtual Mac?";
 "Two Finger Tap Right Click" = "Atinge cu două degete pentru clic dreapta";
 "Two Finger Tap to Secondary Click" = "Atingeți cu două degete pentru clic secundar";

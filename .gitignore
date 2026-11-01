@@ -24,3 +24,7 @@ logs/
 DeviceCrashLogs/
 *.dSYM/
 *.ips
+*.ips.ca.synced
+
+# Diagnostics exports pulled off the device are large and local-only.
+VirtualMac-Diagnostics-*/

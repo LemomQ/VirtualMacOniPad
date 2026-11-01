@@ -221,6 +221,10 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
 - (void)done:(id)sender
 {
     (void)sender;
+    // Re-evaluate the host-side input modes (pointer lock in particular) once
+    // the sheet closes; the settings themselves did not necessarily change.
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:VZSettingsDidChangeNotification object:nil];
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
@@ -233,7 +237,7 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     (void)tableView;
-    return section == 0 ? 4 : section == 1 ? 6 : section == 2 ? 4 :
+    return section == 0 ? 4 : section == 1 ? 7 : section == 2 ? 5 :
         section == 3 ? 3 : section == 4 ? 3 : section == 5 ? 2 :
         section == 6 ? 1 : 4;
 }
@@ -373,6 +377,19 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
             forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = toggle;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (indexPath.section == 1 && indexPath.row == 6) {
+        cell.textLabel.text = VZL(@"Trackpad Scrolling Speed");
+        UISlider *slider = [[[UISlider alloc] initWithFrame:
+            CGRectMake(0, 0, 180, 32)] autorelease];
+        slider.minimumValue = 0.1;
+        slider.maximumValue = 1.0;
+        slider.value = [[settings stringForKey:VZTrackpadScrollingSpeedKey]
+            floatValue];
+        [slider addTarget:self
+            action:@selector(trackpadScrollingSpeedChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = slider;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (indexPath.section == 1) {
         cell.textLabel.text = VZL(@"Scrolling Speed");
         UISlider *slider = [[[UISlider alloc] initWithFrame:
@@ -390,6 +407,15 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
         UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
         toggle.tag = 20;
         toggle.on = [settings boolForKey:VZKeyboardShortcutCaptureKey];
+        [toggle addTarget:self action:@selector(inputToggleChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = toggle;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (indexPath.section == 2 && indexPath.row == 4) {
+        cell.textLabel.text = VZL(@"Lock Pointer to Display");
+        UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
+        toggle.tag = 50;
+        toggle.on = [settings boolForKey:VZPointerLockKey];
         [toggle addTarget:self action:@selector(inputToggleChanged:)
             forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = toggle;
@@ -498,7 +524,8 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
                             VZHomeIndicatorSuppressionKey];
     NSArray *compatibilityKeys = @[VZKeyboardCrashWorkaroundKey,
                                    VZExternalDisplayScrollFixKey];
-    NSString *key = sender.tag >= 100 ? compatibilityKeys[sender.tag - 100]
+    NSString *key = sender.tag == 50 ? VZPointerLockKey
+        : sender.tag >= 100 ? compatibilityKeys[sender.tag - 100]
         : sender.tag >= 30 ? iPadOSKeys[sender.tag - 30]
         : sender.tag == 20 ? VZKeyboardShortcutCaptureKey
                            : touchKeys[sender.tag];
@@ -571,6 +598,13 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
     [VZAppSettings.sharedSettings setString:
         [NSString stringWithFormat:@"%.2f", sender.value]
         forKey:VZScrollingSpeedKey];
+}
+
+- (void)trackpadScrollingSpeedChanged:(UISlider *)sender
+{
+    [VZAppSettings.sharedSettings setString:
+        [NSString stringWithFormat:@"%.2f", sender.value]
+        forKey:VZTrackpadScrollingSpeedKey];
 }
 
 - (void)chooseHUDVisibilityFrom:(UITableViewCell *)cell

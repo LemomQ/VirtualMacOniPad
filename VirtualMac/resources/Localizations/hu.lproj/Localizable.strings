@@ -143,6 +143,7 @@
 "Learn More" = "További információ";
 "Library Appearance" = "Könyvtár megjelenése";
 "Loading extracted Apple virtualization frameworks…" = "Kibontott Apple virtualizációs keretrendszerek betöltése…";
+"Lock Pointer to Display" = "Mutató rögzítése a kijelzőhöz";
 "MAC Address" = "MAC-cím";
 "Mac Keyboard" = "Mac-billentyűzet";
 "Mac Keyboard Shortcuts" = "Mac Billentyűparancsok";
@@ -271,6 +272,7 @@
 "Touch" = "Érintés";
 "Touch and Hold Right Click" = "Hosszan érintés jobb kattintásként";
 "Touch and Hold to Secondary Click" = "Érintse meg és tartsa lenyomva a másodlagos kattintáshoz";
+"Trackpad Scrolling Speed" = "Trackpad görgetési sebessége";
 "Turn Off Virtual Mac Guest Tools?" = "Kikapcsolja a Virtual Mac vendégeszközeit?";
 "Two Finger Tap Right Click" = "Kétujjas koppintás jobb kattintásként";
 "Two Finger Tap to Secondary Click" = "Kétujjas érintés a másodlagos kattintáshoz";

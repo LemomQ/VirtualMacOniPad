@@ -32,6 +32,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <notify.h>
 
 extern char **environ;
 extern int memorystatus_control(uint32_t command, int32_t pid,
@@ -90,6 +91,19 @@ static id gPointingDevice;
 static UIView *gInputView;
 static UIView *gDisplayContainer;
 static CALayer *gDisplayLayer;
+// Locked-screen presentation state. While iPadOS holds the device locked the
+// display is in secure mode, and FrontBoard kills any process that keeps
+// compositing to it ("insecure drawing while in secure mode", bug_type 309,
+// termination code 0x2BAD45EC). The audio background mode that keeps a running
+// VM alive across a lock also keeps the guest framebuffer on screen, so the
+// host stops presenting while the display is unavailable. The flag is written
+// on the main thread and read from the frame callback thread, so it is
+// accessed with explicit acquire/release atomics.
+static volatile uint32_t gDisplayPresentationSuppressed;
+static BOOL gProtectedDataUnavailable;
+static BOOL gApplicationInBackground;
+static int gLockStateNotifyToken = -1;
+static int gBlankedScreenNotifyToken = -1;
 static UIImageView *gCursorView;
 static UILabel *gStatusLabel;
 static UIView *gHUDView;
@@ -129,6 +143,16 @@ static BOOL gScrollGestureActive;
 static BOOL gScrollBeganDelivered;
 static BOOL gScrollEndPending;
 static NSUInteger gScrollEndPhase;
+// Momentum keeps its own accumulator: a synthesized momentum packet must
+// never be summed into a finger delta, and its began/changed/ended lifecycle
+// has to survive coalescing independently of the gesture lifecycle.
+static CGVector gPendingMomentumRaw;
+static CGVector gPendingMomentumAccelerated;
+static NSUInteger gPendingMomentumPhase;
+static BOOL gScrollMomentumDelivered;
+static BOOL gScrollMomentumEndPending;
+static NSUInteger gScrollMomentumEndPhase;
+static BOOL gScrollMayBeginPending;
 static CGVector gPendingScrollRaw;
 static CGVector gPendingScrollAccelerated;
 static BOOL gPendingScrollDirectionInverted;
@@ -138,6 +162,10 @@ static uint64_t gLastHealthReceivedCount;
 static BOOL gDebugLogging;
 static BOOL gFixExternalDisplayScrollDirection;
 static CGFloat gScrollingSpeed = 0.25;
+// Presentation multiplier for hardware-trackpad scrolling. The Ventura curve
+// the bridge reconstructs is tuned for a full-size Mac trackpad, which is far
+// too fast on the small Magic Keyboard surface.
+static CGFloat gTrackpadScrollingSpeed = 0.5;
 static BOOL gShowCursorWhenUsingTouch = YES;
 static BOOL gLastInputWasDirectTouch;
 static BOOL gCursorSuppressedForDirectTouch;
@@ -163,6 +191,24 @@ static CGPoint gMouseLocation;
 static CGPoint gHostPointerLocation;
 static BOOL gHostPointerLocationValid;
 static BOOL gUIKitHoverActive;
+// iOS pointer lock, the same public API UTM uses: while the VM owns the screen
+// the system pointer is locked to the scene, so it can never rest on the screen
+// edges and reveal the iPadOS Dock or the top multitasking affordance. The
+// guest cursor is then driven by the trackpad's relative motion (GCMouse)
+// instead of the absolute hover position.
+static BOOL gPointerLockRequested;
+static BOOL gPointerLocked;
+static UIPointerLockState *gPointerLockState;
+// A locked pointer is only usable while some motion source keeps reaching the
+// app. Trackpad hover deltas and GCMouse deltas are both accepted; if neither
+// arrives after the lock engages, the lock is released automatically instead of
+// leaving the user without any pointer at all.
+static BOOL gPointerLockAbandoned;
+static BOOL gPointerLockHasHoverLocation;
+static CGPoint gPointerLockLastHoverLocation;
+static CFTimeInterval gPointerLockLastMotionTime;
+static uint64_t gPointerLockHoverMotions;
+static uint64_t gPointerLockMouseMotions;
 static CGSize gLastInputBoundsSize;
 static CGFloat gLastPinchScale = 1.0;
 static CGFloat gLastRotation;
@@ -191,8 +237,18 @@ static void sendKey(UIKeyboardHIDUsage usage, BOOL pressed);
 static void sendPointer(CGPoint point, CGRect bounds, NSUInteger pressedButtons);
 static void updateExternalCursorForNormalizedLocation(CGPoint location);
 static void notePointerInputSource(BOOL directTouch);
+static BOOL systemPointerIsLocked(void);
+static void notePointerLockStateIfChanged(void);
+static void releasePointerLock(void);
 static void setStatus(NSString *status);
+static void applyTrackpadScrollingSpeed(void);
+static CGVector scaledDeviceScrollDelta(CGVector delta);
+static void logSystemPointerSpeedPreferences(void);
 static void flushPendingScroll(void);
+static void queueScrollWheel(CGVector rawDelta, CGVector acceleratedDelta,
+                             BOOL directionInvertedFromDevice,
+                             NSUInteger deviceCategory, NSUInteger phase,
+                             NSUInteger momentumPhase);
 static void resetScrollCoalescing(void);
 static void resetScrollDiagnostics(void);
 // External display (Keynote-style: UIWindow.screen = externalScreen)
@@ -470,6 +526,65 @@ static void notePointerInputSource(BOOL directTouch) {
         if (show)
             updateExternalCursorForNormalizedLocation(gLastPointerLocation);
     }
+}
+
+static BOOL systemPointerIsLocked(void)
+{
+    return gPointerLockState ? gPointerLockState.isLocked : NO;
+}
+
+// Drops the lock request so the system pointer becomes usable again.
+static void releasePointerLock(void)
+{
+    gPointerLockRequested = NO;
+    UIViewController *controller = gInputView.window.rootViewController;
+    if ([controller respondsToSelector:
+            @selector(setNeedsUpdateOfPrefersPointerLocked)])
+        [controller setNeedsUpdateOfPrefersPointerLocked];
+}
+
+// Called from the pointer input paths, so a lock transition is observed without
+// depending on the notification constant's exact spelling.
+static void notePointerLockStateIfChanged(void)
+{
+    BOOL locked = systemPointerIsLocked();
+    if (locked == gPointerLocked)
+        return;
+    gPointerLocked = locked;
+    printf("[VirtualMac] pointer lock %s\n", locked ? "engaged" : "released");
+    if (!locked) {
+        gPointerLockHasHoverLocation = NO;
+        return;
+    }
+    // While locked, iPadOS hides the system pointer, so the guest cursor this
+    // app draws is the only pointer the user can see.
+    gUIKitHoverActive = NO;
+    gCursorSuppressedForDirectTouch = NO;
+    notePointerInputSource(NO);
+    if (gCursorView && gCursorView.image)
+        gCursorView.hidden = NO;
+    gPointerLockHasHoverLocation = NO;
+    gPointerLockLastMotionTime = CACurrentMediaTime();
+    gPointerLockHoverMotions = 0;
+    gPointerLockMouseMotions = 0;
+    // A locked pointer without a motion source is unusable: the system pointer
+    // is frozen and nothing can move the guest cursor. iPadOS reports no
+    // GCMouse for the Magic Keyboard trackpad, so this watchdog is what keeps
+    // the lock from stranding the user with no pointer at all.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!gPointerLocked || gPointerLockAbandoned)
+            return;
+        if (CACurrentMediaTime() - gPointerLockLastMotionTime < 2.4)
+            return;
+        printf("[VirtualMac] pointer lock released early: no pointer motion "
+               "(hover=%llu mouse=%llu)\n",
+               (unsigned long long)gPointerLockHoverMotions,
+               (unsigned long long)gPointerLockMouseMotions);
+        gPointerLockAbandoned = YES;
+        releasePointerLock();
+    });
 }
 
 static BOOL shouldShowStatusLabel(void) {
@@ -852,14 +967,73 @@ static void sendScrollWheelEvent(CGVector rawDelta, CGVector acceleratedDelta,
 static BOOL gTrackpadDirectionInverted;
 static BOOL gSurfaceMouseDirectionInverted;
 
+// The trackpad speed multiplier reaches the guest through whichever trackpad
+// data path the build uses: the device-delta path scales the deltas at the
+// call site (see scaledDeviceScrollDelta), and the reconstructed Mac-curve
+// bridge scales its injected displacement internally. 1.0 means untouched.
+static void applyTrackpadScrollingSpeed(void)
+{
+    gTrackpadScrollingSpeed = MAX(0.1, MIN(1.0,
+        [[VZAppSettings.sharedSettings
+            stringForKey:VZTrackpadScrollingSpeedKey] doubleValue]));
+    VZTrackpadScrollBridgeSetOutputScale(gTrackpadScrollingSpeed);
+}
+
+// The device-delta trackpad path hands iPadOS's own raw and accelerated deltas
+// to the coalescer, so its speed multiplier is applied here. UIKit already
+// reports fractional points on this path, so no integer remainder is needed.
+static CGVector scaledDeviceScrollDelta(CGVector delta)
+{
+    return CGVectorMake(delta.dx * gTrackpadScrollingSpeed,
+                        delta.dy * gTrackpadScrollingSpeed);
+}
+
+// iPadOS stores its "Pointer Control > Mouse Options > Scrolling Speed" value
+// in an Accessibility preference domain. Dump the candidate keys while Debug
+// Logging is on so the exact key can be confirmed on device before the app
+// starts following it.
+static void logSystemPointerSpeedPreferences(void)
+{
+    if (!gDebugLogging)
+        return;
+    NSArray<NSString *> *domains = @[@"com.apple.Accessibility",
+                                     @"com.apple.UIKit",
+                                     @"com.apple.Preferences"];
+    for (NSString *domain in domains) {
+        CFStringRef name = (__bridge CFStringRef)domain;
+        CFPreferencesAppSynchronize(name);
+        NSDictionary *values = CFBridgingRelease(CFPreferencesCopyMultiple(
+            NULL, name, kCFPreferencesAnyUser, kCFPreferencesAnyHost));
+        if (![values isKindOfClass:NSDictionary.class])
+            continue;
+        for (NSString *key in [values.allKeys
+                 sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString *lowercase = key.lowercaseString;
+            if (![lowercase containsString:@"scroll"] &&
+                ![lowercase containsString:@"pointer"] &&
+                ![lowercase containsString:@"trackpad"] &&
+                ![lowercase containsString:@"speed"])
+                continue;
+            printf("[VirtualMac] system pointer pref %s %s=%s\n",
+                   domain.UTF8String, key.UTF8String,
+                   [[values[key] description] UTF8String]);
+        }
+    }
+}
+
+// Every real gesture source feeds the per-frame coalescer, exactly like the
+// wheel path. Injecting one XPC scroll event per HID report (a trackpad
+// reports at up to 120 Hz and adds a 60 Hz synthesized momentum stream) floods
+// the guest event queue and shows up as stutter, so the bridge's output is
+// accumulated and injected at most once per display frame instead.
 static void emitTrackpadScroll(CGVector rawDelta,
                                CGVector acceleratedDelta,
                                NSUInteger phase,
                                NSUInteger momentumPhase,
                                __unused void *context) {
-    sendScrollWheelEvent(rawDelta, acceleratedDelta,
-                         gTrackpadDirectionInverted, 2, phase,
-                         momentumPhase);
+    queueScrollWheel(rawDelta, acceleratedDelta,
+                     gTrackpadDirectionInverted, 2, phase,
+                     momentumPhase);
 }
 
 static void emitTouchScroll(CGVector rawDelta,
@@ -867,8 +1041,8 @@ static void emitTouchScroll(CGVector rawDelta,
                             NSUInteger phase,
                             NSUInteger momentumPhase,
                             __unused void *context) {
-    sendScrollWheelEvent(rawDelta, acceleratedDelta, YES, 1, phase,
-                         momentumPhase);
+    queueScrollWheel(rawDelta, acceleratedDelta, YES, 1, phase,
+                     momentumPhase);
 }
 
 static void emitSurfaceMouseScroll(CGVector rawDelta,
@@ -876,9 +1050,9 @@ static void emitSurfaceMouseScroll(CGVector rawDelta,
                                    NSUInteger phase,
                                    NSUInteger momentumPhase,
                                    __unused void *context) {
-    sendScrollWheelEvent(rawDelta, acceleratedDelta,
-                         gSurfaceMouseDirectionInverted, 1, phase,
-                         momentumPhase);
+    queueScrollWheel(rawDelta, acceleratedDelta,
+                     gSurfaceMouseDirectionInverted, 1, phase,
+                     momentumPhase);
 }
 
 // Immediate single-event path kept for the scripted input command; the
@@ -933,6 +1107,35 @@ static void resumeScrollFlush(void) {
 // so the guest sees a continuous, smooth stream (like macOS wheel delivery).
 static const double kScrollMaxDeltaPerEvent = 40.0;
 
+static BOOL scrollDeltaIsZero(CGVector delta) {
+    return delta.dx == 0 && delta.dy == 0;
+}
+
+// Remove this frame's slice from a pending accumulator. The whole delta is
+// used when it fits under the per-event cap, otherwise a proportional slice
+// keeps the raw and accelerated components at the ratio the device reported.
+static void takeScrollSlice(CGVector *pendingRaw, CGVector *pendingAccelerated,
+                            CGVector *sliceRaw, CGVector *sliceAccelerated) {
+    double maxDelta = MAX(fabs(pendingAccelerated->dx),
+                          fabs(pendingAccelerated->dy));
+    CGVector deltaRaw = *pendingRaw;
+    CGVector deltaAccel = *pendingAccelerated;
+    if (maxDelta > kScrollMaxDeltaPerEvent) {
+        double ratio = kScrollMaxDeltaPerEvent / maxDelta;
+        deltaRaw = CGVectorMake(pendingRaw->dx * ratio,
+                                pendingRaw->dy * ratio);
+        deltaAccel = CGVectorMake(pendingAccelerated->dx * ratio,
+                                  pendingAccelerated->dy * ratio);
+    }
+    *pendingRaw = CGVectorMake(pendingRaw->dx - deltaRaw.dx,
+                               pendingRaw->dy - deltaRaw.dy);
+    *pendingAccelerated = CGVectorMake(
+        pendingAccelerated->dx - deltaAccel.dx,
+        pendingAccelerated->dy - deltaAccel.dy);
+    *sliceRaw = deltaRaw;
+    *sliceAccelerated = deltaAccel;
+}
+
 static void flushPendingScroll(void) {
     gScrollDisplayLink.paused = YES;
     if (!gPointingDevice) {
@@ -940,39 +1143,21 @@ static void flushPendingScroll(void) {
         return;
     }
     BOOL sendBegan = gScrollGestureActive && !gScrollBeganDelivered;
-    BOOL hasPendingDelta = gPendingScrollRaw.dx != 0 ||
-        gPendingScrollRaw.dy != 0 ||
-        gPendingScrollAccelerated.dx != 0 ||
-        gPendingScrollAccelerated.dy != 0;
-    if (!sendBegan && !hasPendingDelta && !gScrollEndPending)
+    BOOL gestureHasDelta = !scrollDeltaIsZero(gPendingScrollRaw) ||
+        !scrollDeltaIsZero(gPendingScrollAccelerated);
+    BOOL momentumHasDelta = !scrollDeltaIsZero(gPendingMomentumRaw) ||
+        !scrollDeltaIsZero(gPendingMomentumAccelerated) ||
+        (gPendingMomentumPhase == 1 && !gScrollMomentumDelivered);
+    if (!sendBegan && !gestureHasDelta && !gScrollEndPending &&
+        !momentumHasDelta && !gScrollMomentumEndPending &&
+        !gScrollMayBeginPending)
         return; // nothing to deliver this frame
 
-    // Slice this frame's delta: the whole pending delta when it fits under
-    // the per-event cap, otherwise a proportional slice so the raw and
-    // accelerated components keep the ratio the device reported.
-    double maxDelta = MAX(fabs(gPendingScrollAccelerated.dx),
-                          fabs(gPendingScrollAccelerated.dy));
-    CGVector deltaRaw = gPendingScrollRaw;
-    CGVector deltaAccel = gPendingScrollAccelerated;
-    if (gPendingScrollDeviceCategory == 0 &&
-        maxDelta > kScrollMaxDeltaPerEvent) {
-        double ratio = kScrollMaxDeltaPerEvent / maxDelta;
-        deltaRaw = CGVectorMake(gPendingScrollRaw.dx * ratio,
-                                gPendingScrollRaw.dy * ratio);
-        deltaAccel = CGVectorMake(gPendingScrollAccelerated.dx * ratio,
-                                  gPendingScrollAccelerated.dy * ratio);
-    }
-    gPendingScrollRaw = CGVectorMake(
-        gPendingScrollRaw.dx - deltaRaw.dx,
-        gPendingScrollRaw.dy - deltaRaw.dy);
-    gPendingScrollAccelerated = CGVectorMake(
-        gPendingScrollAccelerated.dx - deltaAccel.dx,
-        gPendingScrollAccelerated.dy - deltaAccel.dy);
-    BOOL drained = gPendingScrollRaw.dx == 0 && gPendingScrollRaw.dy == 0 &&
-        gPendingScrollAccelerated.dx == 0 &&
-        gPendingScrollAccelerated.dy == 0;
-    if (sendBegan || deltaRaw.dx != 0 || deltaRaw.dy != 0 ||
-        deltaAccel.dx != 0 || deltaAccel.dy != 0) {
+    if (sendBegan || gestureHasDelta) {
+        CGVector deltaRaw;
+        CGVector deltaAccel;
+        takeScrollSlice(&gPendingScrollRaw, &gPendingScrollAccelerated,
+                        &deltaRaw, &deltaAccel);
         // Mouse wheels are phase-less on a real Mac. Trackpad and direct
         // touch input retain their began/changed lifecycle so AppKit can
         // rubber-band and finalize the gesture normally.
@@ -984,9 +1169,9 @@ static void flushPendingScroll(void) {
                              eventPhase, 0);
         gScrollBeganDelivered = YES;
     }
-    if (drained && gScrollEndPending) {
-        // Close a direct two-finger touch gesture only after all coalesced
-        // deltas have been delivered. Hardware wheels are phase-less below.
+    if (scrollDeltaIsZero(gPendingScrollRaw) &&
+        scrollDeltaIsZero(gPendingScrollAccelerated) && gScrollEndPending) {
+        // Close a gesture only after all coalesced deltas have been delivered.
         sendScrollWheelEvent(CGVectorMake(0, 0), CGVectorMake(0, 0),
                              gPendingScrollDirectionInverted,
                              gPendingScrollDeviceCategory,
@@ -997,19 +1182,122 @@ static void flushPendingScroll(void) {
         gScrollBeganDelivered = NO;
     }
 
-    // Keep the link alive only while delta remains to stream.
-    if (!drained)
+    // Momentum is streamed the same way: one event per frame carrying the
+    // accumulated delta with the latest phase. Its began/changed/ended
+    // lifecycle survives coalescing because the terminal packet is released
+    // only once the accumulated delta has been sent.
+    if (momentumHasDelta) {
+        CGVector deltaRaw;
+        CGVector deltaAccel;
+        takeScrollSlice(&gPendingMomentumRaw, &gPendingMomentumAccelerated,
+                        &deltaRaw, &deltaAccel);
+        sendScrollWheelEvent(deltaRaw, deltaAccel,
+                             gPendingScrollDirectionInverted,
+                             gPendingScrollDeviceCategory, 0,
+                             gScrollMomentumDelivered ? 4 : 1);
+        gScrollMomentumDelivered = YES;
+        gPendingMomentumPhase = 0;
+    }
+    if (scrollDeltaIsZero(gPendingMomentumRaw) &&
+        scrollDeltaIsZero(gPendingMomentumAccelerated) &&
+        gScrollMomentumEndPending) {
+        sendScrollWheelEvent(CGVectorMake(0, 0), CGVectorMake(0, 0),
+                             gPendingScrollDirectionInverted,
+                             gPendingScrollDeviceCategory, 0,
+                             gScrollMomentumEndPhase ? gScrollMomentumEndPhase
+                                                     : 8);
+        gScrollMomentumEndPending = NO;
+        gScrollMomentumEndPhase = 0;
+        gScrollMomentumDelivered = NO;
+        gPendingMomentumPhase = 0;
+    }
+
+    // A zero-delta contact packet stops deceleration already owned by the
+    // guest. It must follow the momentum sequence it cancelled, so it waits
+    // until that bucket is closed.
+    if (gScrollMayBeginPending &&
+        scrollDeltaIsZero(gPendingMomentumRaw) &&
+        scrollDeltaIsZero(gPendingMomentumAccelerated) &&
+        !gScrollMomentumEndPending) {
+        sendScrollWheelEvent(CGVectorMake(0, 0), CGVectorMake(0, 0),
+                             gPendingScrollDirectionInverted,
+                             gPendingScrollDeviceCategory, 32, 0);
+        gScrollMayBeginPending = NO;
+    }
+
+    // Keep the link alive only while something still has to be streamed.
+    BOOL gesturePending = !scrollDeltaIsZero(gPendingScrollRaw) ||
+        !scrollDeltaIsZero(gPendingScrollAccelerated) ||
+        (gScrollGestureActive && !gScrollBeganDelivered) || gScrollEndPending;
+    BOOL momentumPending = !scrollDeltaIsZero(gPendingMomentumRaw) ||
+        !scrollDeltaIsZero(gPendingMomentumAccelerated) ||
+        (gPendingMomentumPhase == 1 && !gScrollMomentumDelivered) ||
+        gScrollMomentumEndPending;
+    if (gesturePending || momentumPending || gScrollMayBeginPending)
         gScrollDisplayLink.paused = NO;
 }
 
 static void queueScrollWheel(CGVector rawDelta, CGVector acceleratedDelta,
                              BOOL directionInvertedFromDevice,
                              NSUInteger deviceCategory,
-                             NSUInteger phase) {
+                             NSUInteger phase, NSUInteger momentumPhase) {
     if (gDebugLogging)
         gScrollReceivedEventCount++;
     BOOL eventHasDelta = rawDelta.dx != 0 || rawDelta.dy != 0 ||
         acceleratedDelta.dx != 0 || acceleratedDelta.dy != 0;
+
+    // Momentum (synthesized by the bridge or supplied by the device) carries
+    // its phase in momentumPhase with no gesture scrollPhase, exactly like a
+    // real Mac. It keeps a separate accumulator so a momentum packet can never
+    // be summed into a finger delta, and it is still limited to one event per
+    // display frame.
+    if (momentumPhase != 0) {
+        if (momentumPhase == 1) {
+            // A new sequence cancels a terminal edge left by the previous one.
+            gScrollMomentumEndPending = NO;
+            gScrollMomentumEndPhase = 0;
+            gScrollMomentumDelivered = NO;
+        }
+        if (momentumPhase == 8 || momentumPhase == 16) {
+            // The terminal packet repeats no delta. Release it only after the
+            // accumulated momentum delta has been flushed.
+            gScrollMomentumEndPhase = momentumPhase;
+            gScrollMomentumEndPending = YES;
+        } else {
+            gPendingMomentumPhase = momentumPhase;
+            gPendingMomentumRaw = CGVectorMake(
+                gPendingMomentumRaw.dx + rawDelta.dx,
+                gPendingMomentumRaw.dy + rawDelta.dy);
+            gPendingMomentumAccelerated = CGVectorMake(
+                gPendingMomentumAccelerated.dx + acceleratedDelta.dx,
+                gPendingMomentumAccelerated.dy + acceleratedDelta.dy);
+        }
+        gPendingScrollDirectionInverted = directionInvertedFromDevice;
+        gPendingScrollDeviceCategory = deviceCategory;
+        resumeScrollFlush();
+        return;
+    }
+
+    // The physical contact packet that stops deceleration has no delta and
+    // must not be reordered behind the next gesture's began, so it is injected
+    // at once whenever nothing else is queued. It arrives once per two-finger
+    // contact, so it needs no rate limiting.
+    if (phase == 32) {
+        if (gPendingMomentumPhase != 0 || gScrollMomentumEndPending ||
+            gScrollGestureActive || !scrollDeltaIsZero(gPendingScrollRaw) ||
+            !scrollDeltaIsZero(gPendingScrollAccelerated)) {
+            gScrollMayBeginPending = YES;
+            gPendingScrollDirectionInverted = directionInvertedFromDevice;
+            gPendingScrollDeviceCategory = deviceCategory;
+            resumeScrollFlush();
+            return;
+        }
+        sendScrollWheelEvent(CGVectorMake(0, 0), CGVectorMake(0, 0),
+                             directionInvertedFromDevice, deviceCategory,
+                             32, 0);
+        return;
+    }
+
     // Hardware wheel input (deviceCategory 0) is discrete wheel semantics:
     // the guest receives phase-less scroll events, exactly like a real Mac
     // mouse wheel, so AppKit scroll views apply each delta directly. The
@@ -1093,6 +1381,13 @@ static void resetScrollCoalescing(void) {
     gPendingScrollAccelerated = CGVectorMake(0, 0);
     gPendingScrollDirectionInverted = NO;
     gPendingScrollDeviceCategory = 0;
+    gPendingMomentumRaw = CGVectorMake(0, 0);
+    gPendingMomentumAccelerated = CGVectorMake(0, 0);
+    gPendingMomentumPhase = 0;
+    gScrollMomentumDelivered = NO;
+    gScrollMomentumEndPending = NO;
+    gScrollMomentumEndPhase = 0;
+    gScrollMayBeginPending = NO;
     if (gScrollDisplayLink)
         gScrollDisplayLink.paused = YES;
 }
@@ -1124,10 +1419,17 @@ static void installGCMouse(void) {
     mouse.mouseInput.mouseMovedHandler =
         ^(GCMouseInput *input, float deltaX, float deltaY) {
         (void)input;
-        // UIKit hover is the authoritative absolute path for a trackpad.
-        // Some devices also appear as GCMouse; accepting both makes motion
-        // jump or hit artificial edges after system UI steals the pointer.
-        if (gUIKitHoverActive)
+        notePointerLockStateIfChanged();
+        if (gPointerLocked) {
+            gPointerLockMouseMotions++;
+            gPointerLockLastMotionTime = CACurrentMediaTime();
+        }
+        // UIKit hover is the authoritative absolute path for a trackpad, but it
+        // stops tracking the hardware once iPadOS locks the pointer to the
+        // scene; relative motion is then the only source of movement. Some
+        // devices also appear as GCMouse, and accepting both would make motion
+        // jump or hit artificial edges, hence the gUIKitHoverActive guard.
+        if (gUIKitHoverActive && !gPointerLocked)
             return;
         sendMouseDelta(deltaX, deltaY);
     };
@@ -1811,18 +2113,19 @@ static bool pencilVsockSend(uint8_t type, float pressure,
             // digitizers are split into categories 1 and 2 by surface height.
             // The official iPad Magic Keyboard is category 1; other tested
             // trackpads are category 2. Both carry the same HID contact
-            // lifecycle and belong on the Mac trackpad path. Source 0x0b
-            // wheel/surface mice remain UIKit categories 3-5 below.
-            // The HID root contains physical trackpad mickeys and reliable
-            // contact phases. Its accelerated child is tuned for iPadOS, not
-            // AppKit/VZ, so run only the root through Ventura's Mac curve.
-            // Ignore iPadOS momentum packets: the Mac bridge produces the
-            // corresponding 60 Hz stream and a MayBegin packet cancels it.
+            // lifecycle. Source 0x0b wheel/surface mice remain UIKit
+            // categories 3-5 below.
+            //
+            // Hand the trackpad iPadOS's own raw and accelerated deltas plus
+            // its own momentum, injected phase-less through the per-frame
+            // coalescer. This is the data path the 1.2 scroll-fix shipped, and
+            // its speed already follows the iPadOS pointer scrolling-speed
+            // setting; the trackpad speed setting scales it further.
             gTrackpadDirectionInverted = _vzDirectionInverted;
-            if (_vzMomentumPhase == 0) {
-                VZTrackpadScrollBridgeHandle(_vzRawDelta, _vzHIDPhase,
-                                             _vzEventTimestamp);
-            }
+            queueScrollWheel(scaledDeviceScrollDelta(_vzRawDelta),
+                             scaledDeviceScrollDelta(_vzAcceleratedDelta),
+                             _vzDirectionInverted, 0, 0,
+                             hidMomentumPhaseFromUIKitPhase(_vzMomentumPhase));
         } else if (category == 3) {
             // Magic Mouse surface reports have contact phases but no native
             // macOS momentum on supported iPadOS. Reconstruct that stage in
@@ -1832,16 +2135,16 @@ static bool pencilVsockSend(uint8_t type, float pressure,
                 VZSurfaceMouseScrollBridgeHandle(
                     _vzRawDelta, _vzHIDPhase, _vzEventTimestamp);
             else
-                sendScrollWheelEvent(
+                queueScrollWheel(
                     _vzRawDelta, _vzAcceleratedDelta,
                     _vzDirectionInverted, 1, 0,
                     hidMomentumPhaseFromUIKitPhase(_vzMomentumPhase));
         } else {
             // A wheel has no contact phase. Preserve the proven display-rate
             // coalescing for high-report-rate mice; Magic Mouse momentum is
-            // already generated by the host HID stack and remains immediate.
+            // already generated by the host HID stack.
             queueScrollWheel(_vzRawDelta, _vzAcceleratedDelta,
-                             _vzDirectionInverted, 0, 0);
+                             _vzDirectionInverted, 0, 0, 0);
         }
     }
     static NSUInteger sourceSamples;
@@ -2114,9 +2417,29 @@ static void sendSoftwareChord(UIKeyboardHIDUsage usage, BOOL shifted,
     switch (recognizer.state) {
     case UIGestureRecognizerStateBegan:
     case UIGestureRecognizerStateChanged:
+        notePointerLockStateIfChanged();
         notePointerInputSource(NO);
-        gUIKitHoverActive = YES;
-        sendIndirectPointerLocation(location, self.bounds);
+        if (gPointerLocked) {
+            // While the pointer is locked the hover location may still follow
+            // the trackpad even though the system pointer is frozen. Feed the
+            // difference to the guest cursor so the trackpad stays usable.
+            if (gPointerLockHasHoverLocation) {
+                CGPoint delta = CGPointMake(
+                    location.x - gPointerLockLastHoverLocation.x,
+                    location.y - gPointerLockLastHoverLocation.y);
+                if (delta.x != 0 || delta.y != 0) {
+                    gPointerLockHoverMotions++;
+                    gPointerLockLastMotionTime = CACurrentMediaTime();
+                    // sendMouseDelta takes GCMouse semantics (positive Y is up).
+                    sendMouseDelta((float)delta.x, (float)-delta.y);
+                }
+            }
+            gPointerLockLastHoverLocation = location;
+            gPointerLockHasHoverLocation = YES;
+        } else {
+            gUIKitHoverActive = YES;
+            sendIndirectPointerLocation(location, self.bounds);
+        }
         // Apple Pencil hover: zOffset is available from iPadOS 16.1 and is
         // zero for devices without hover support, including trackpads. The
         // supported M2 iPad can therefore relay position on 16.1-16.3.1.
@@ -2258,15 +2581,16 @@ static void sendSoftwareChord(UIKeyboardHIDUsage usage, BOOL shifted,
     // wheel semantics. Direct touch uses the separate category 1 path.
     NSUInteger deviceCategory = recognizer.vzUIKitDeviceCategory;
     if (deviceCategory == 1 || deviceCategory == 2) {
-        // UIKit exposes the iPad trackpad's nonaccelerated stream but omits
-        // the Mac driver's acceleration and momentum stages. The bridge ports
-        // Ventura's MultitouchHID/IOHID behavior, normalizes UIKit's fractional
-        // post-pause jitter, and discards UIKit's repeated terminal sample.
+        // Device-delta trackpad path, matching -_scrollingChangedWithEvent:.
+        // This target only runs when the private HID event was unavailable.
         if (gDebugLogging)
             gScrollReceivedEventCount++;
         gTrackpadDirectionInverted = recognizer.vzDirectionInverted;
-        VZTrackpadScrollBridgeHandle(recognizer.vzRawDelta, phase,
-                                     recognizer.vzEventTimestamp);
+        queueScrollWheel(scaledDeviceScrollDelta(recognizer.vzRawDelta),
+                         scaledDeviceScrollDelta(
+                             recognizer.vzAcceleratedDelta),
+                         recognizer.vzDirectionInverted, 0, phase,
+                         recognizer.vzMomentumPhase);
     } else if (deviceCategory == 3) {
         gSurfaceMouseDirectionInverted = recognizer.vzDirectionInverted;
         if (recognizer.vzMomentumPhase == 0)
@@ -2274,7 +2598,7 @@ static void sendSoftwareChord(UIKeyboardHIDUsage usage, BOOL shifted,
                 recognizer.vzRawDelta, phase,
                 recognizer.vzEventTimestamp);
         else
-            sendScrollWheelEvent(
+            queueScrollWheel(
                 recognizer.vzRawDelta, recognizer.vzAcceleratedDelta,
                 recognizer.vzDirectionInverted, 1, 0,
                 hidMomentumPhaseFromUIKitPhase(
@@ -2284,7 +2608,8 @@ static void sendSoftwareChord(UIKeyboardHIDUsage usage, BOOL shifted,
                          recognizer.vzAcceleratedDelta,
                          recognizer.vzDirectionInverted,
                          deviceCategory,
-                         phase);
+                         phase,
+                         recognizer.vzMomentumPhase);
     }
 }
 
@@ -3218,7 +3543,10 @@ static bool pencilVsockSend(uint8_t type, float pressure,
     gShowCursorWhenUsingTouch = [VZAppSettings.sharedSettings
         boolForKey:VZShowCursorWhenUsingTouchKey];
     notePointerInputSource(gLastInputWasDirectTouch);
-    printf("[VirtualMac] scroll settings speed=%.2f\n", gScrollingSpeed);
+    applyTrackpadScrollingSpeed();
+    printf("[VirtualMac] scroll settings speed=%.2f trackpad=%.2f\n",
+           gScrollingSpeed, gTrackpadScrollingSpeed);
+    [self updatePointerLockPreference];
     if (gStatusLabel)
         gStatusLabel.hidden = !shouldShowStatusLabel();
     [self updateImmersivePresentation];
@@ -3382,6 +3710,10 @@ static bool pencilVsockSend(uint8_t type, float pressure,
         image:[UIImage systemImageNamed:@"gearshape"] identifier:nil
         handler:^(UIAction *action) {
         (void)action;
+        // Settings need the system pointer, so drop the lock while they are up.
+        // Closing them posts the settings-changed notification, which restores
+        // the lock when the VM is still on screen.
+        releasePointerLock();
         VZSettingsViewController *controller = [[[VZSettingsViewController alloc]
             initWithMachines:VZDiscoverVirtualMachines()] autorelease];
         UINavigationController *navigation = [[[UINavigationController alloc]
@@ -3565,17 +3897,51 @@ static void VZWriteInstallationAttempt(NSString *attemptPath, NSString *state,
             fputs("active\n", marker);
             fclose(marker);
         }
+        // A new VM session retries the pointer lock even after a previous one
+        // was abandoned for having no motion source.
+        gPointerLockAbandoned = NO;
         resetPointerSession(YES);
     } else {
         unlink("/tmp/virtual-mac-vm-active");
     }
+    [self updatePointerLockPreference];
     [self updateImmersivePresentation];
     [self updateHUDVisibility];
+}
+
+// Requests iPadOS pointer lock while the VM owns the screen. The system honors
+// it only when the scene is full screen and foreground-active, and it releases
+// the lock on its own as soon as that stops being true (for example after
+// switching apps), which is also how the user escapes the lock.
+- (void)updatePointerLockPreference
+{
+    if (!gPointerLockState) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (scene.pointerLockState) {
+            gPointerLockState = [scene.pointerLockState retain];
+            printf("[VirtualMac] pointer lock state bound\n");
+        }
+    }
+    BOOL requested = self.isVMDisplayActive && !gPointerLockAbandoned &&
+        [VZAppSettings.sharedSettings boolForKey:VZPointerLockKey];
+    if (requested == gPointerLockRequested && gPointerLockState)
+        return;
+    gPointerLockRequested = requested;
+    [self setNeedsUpdateOfPrefersPointerLocked];
+    printf("[VirtualMac] pointer lock requested=%d system-locked=%d\n",
+           requested, systemPointerIsLocked());
+}
+
+- (BOOL)prefersPointerLocked
+{
+    return gPointerLockRequested;
 }
 
 - (void)presentVMLibrary
 {
     printf("[VirtualMac] presenting VM library\n");
+    // The library and the settings it hosts need the system pointer back.
+    releasePointerLock();
     BOOL crossfade = self.isVMDisplayActive;
     if (!self.libraryNavigationController) {
         VZVMLibraryViewController *library =
@@ -4144,6 +4510,10 @@ static void VZWriteInstallationAttempt(NSString *attemptPath, NSString *state,
     gDisplayLayer = nil;
     gDisplayContainer = nil;
     gFramebuffer = nil;
+    // A stopped VM presents nothing; the next start re-evaluates the display
+    // state in activateFramebuffer().
+    __atomic_store_n(&gDisplayPresentationSuppressed, 0u, __ATOMIC_RELEASE);
+    VZSetNSViewFrameRequestsSuppressed(NO);
     [gFramebufferView release];
     gFramebufferView = nil;
     [gVirtualMachine release];
@@ -4281,6 +4651,185 @@ static void updateDisplayGeometry(void) {
     }
 }
 
+// ─── Locked-screen presentation suppression ─────────────────────────────────
+// While iPadOS holds the device locked, the display is in secure mode and
+// FrontBoard terminates any process that keeps compositing to it: bug_type
+// 309, RBSTerminateContext domain 10, code 0x2BAD45EC, "Process detected
+// doing insecure drawing while in secure mode". The audio background mode
+// that keeps a running VM alive across a lock also keeps the guest framebuffer
+// on screen, which is what FrontBoard rejects.
+//
+// Suspending presentation must not disturb the VM. The VMM keeps running, and
+// the extracted framework keeps acknowledging every buffer it receives, so the
+// guest's in-flight surface pool stays healthy and the desktop is intact when
+// the display comes back.
+
+static uint64_t lockNotifyState(int token) {
+    uint64_t state = 0;
+    if (token < 0)
+        return 0;
+    if (notify_get_state(token, &state) != NOTIFY_STATUS_OK)
+        return 0;
+    return state;
+}
+
+static BOOL displayPresentationIsSuppressed(void) {
+    return __atomic_load_n(&gDisplayPresentationSuppressed,
+                           __ATOMIC_ACQUIRE) != 0;
+}
+
+static BOOL displayIsUnavailable(void) {
+    if (lockNotifyState(gLockStateNotifyToken) != 0)
+        return YES;
+    if (lockNotifyState(gBlankedScreenNotifyToken) != 0)
+        return YES;
+    // Fallbacks for builds where the SpringBoard notify state cannot be read:
+    // with a passcode set, protected files are unreadable while locked, and a
+    // backgrounded app is not on screen either.
+    return gProtectedDataUnavailable || gApplicationInBackground;
+}
+
+static void setGuestDisplayLayerAttached(BOOL attached) {
+    CALayer *layer = gDisplayLayer;
+    CALayer *containerLayer = gDisplayContainer.layer;
+    if (!layer || !containerLayer)
+        return;
+    if (attached) {
+        if (layer.superlayer != containerLayer)
+            [containerLayer insertSublayer:layer atIndex:0];
+        layer.hidden = NO;
+    } else {
+        // Detaching the display layer takes the guest surface out of the
+        // render tree, so no frame can reach a locked display even if one
+        // still arrives while presentation is suspended.
+        layer.hidden = YES;
+        [layer removeFromSuperlayer];
+    }
+}
+
+static void updateDisplayPresentationState(BOOL force) {
+    BOOL suppress = displayIsUnavailable();
+    if (!force && suppress == displayPresentationIsSuppressed())
+        return;
+    __atomic_store_n(&gDisplayPresentationSuppressed, suppress ? 1u : 0u,
+                     __ATOMIC_RELEASE);
+    VZSetNSViewFrameRequestsSuppressed(suppress);
+    setGuestDisplayLayerAttached(!suppress);
+    if (suppress) {
+        if (gExternalMirrorView)
+            gExternalMirrorView.layer.contents = nil;
+    } else {
+        updateDisplayGeometry();
+        // The extracted framework decides whether to ask the VMM for frames
+        // from the shim window's occlusion state. The window reports itself
+        // visible again now, so re-post the AppKit occlusion change for every
+        // window the framework might be watching.
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]])
+                continue;
+            for (UIWindow *window in ((UIWindowScene *)scene).windows)
+                [center postNotificationName:
+                    NSWindowDidChangeOcclusionStateNotification object:window];
+        }
+    }
+    // Print the decision after acting on it: the attached flag is what proves
+    // on device that the layer really left and re-entered the render tree.
+    printf("[VirtualMac] display presentation %s lock=%llu blanked=%llu "
+           "protected-unavailable=%d background=%d attached=%d\n",
+           suppress ? "suspended" : "restored",
+           (unsigned long long)lockNotifyState(gLockStateNotifyToken),
+           (unsigned long long)lockNotifyState(gBlankedScreenNotifyToken),
+           gProtectedDataUnavailable, gApplicationInBackground,
+           gDisplayLayer != nil && gDisplayLayer.superlayer != nil);
+}
+
+static void installLockedScreenSuppression(void) {
+    dispatch_queue_t mainQueue = dispatch_get_main_queue();
+    int status = notify_register_dispatch("com.apple.springboard.lockstate",
+        &gLockStateNotifyToken, mainQueue, ^(int token) {
+            (void)token;
+            updateDisplayPresentationState(NO);
+        });
+    if (status != NOTIFY_STATUS_OK) {
+        printf("[VirtualMac] lockstate notify unavailable status=%d\n", status);
+        gLockStateNotifyToken = -1;
+    }
+    status = notify_register_dispatch("com.apple.springboard.hasBlankedScreen",
+        &gBlankedScreenNotifyToken, mainQueue, ^(int token) {
+            (void)token;
+            updateDisplayPresentationState(NO);
+        });
+    if (status != NOTIFY_STATUS_OK) {
+        printf("[VirtualMac] blanked-screen notify unavailable status=%d\n",
+               status);
+        gBlankedScreenNotifyToken = -1;
+    }
+
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    // MRC: the block observer tokens must be retained or the observation goes
+    // away with the enclosing autorelease pool.
+    static id protectedUnavailableObserver;
+    static id protectedAvailableObserver;
+    static id backgroundObserver;
+    static id foregroundObserver;
+    protectedUnavailableObserver = [[center addObserverForName:
+        UIApplicationProtectedDataWillBecomeUnavailable
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gProtectedDataUnavailable = YES;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    protectedAvailableObserver = [[center addObserverForName:
+        UIApplicationProtectedDataDidBecomeAvailable
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gProtectedDataUnavailable = NO;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    backgroundObserver = [[center addObserverForName:
+        UIApplicationDidEnterBackgroundNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gApplicationInBackground = YES;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    foregroundObserver = [[center addObserverForName:
+        UIApplicationWillEnterForegroundNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            gApplicationInBackground = NO;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    // Redundant resume triggers. A lock does not always deliver the
+    // background/foreground pair on every iPadOS build, but it always resigns
+    // and re-activates the scene. Recomputing is idempotent, and neither
+    // notification may touch gApplicationInBackground: a transient inactive
+    // state (Control Centre, app switcher) is not a background transition.
+    static id resignActiveObserver;
+    static id becomeActiveObserver;
+    resignActiveObserver = [[center addObserverForName:
+        UIApplicationWillResignActiveNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    becomeActiveObserver = [[center addObserverForName:
+        UIApplicationDidBecomeActiveNotification
+        object:nil queue:[NSOperationQueue mainQueue]
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            updateDisplayPresentationState(NO);
+        }] retain];
+    printf("[VirtualMac] locked-screen presentation suppression installed\n");
+    updateDisplayPresentationState(YES);
+}
+
 static void setStatus(NSString *status) {
     printf("[VirtualMac] %s\n", [status UTF8String]);
     if (!gStatusLabel)
@@ -4303,8 +4852,10 @@ static void traceFrameUpdate(id self, SEL selector, id framebuffer,
                shared ? shared->control : NULL);
     ((void(*)(id, SEL, id, VZFrameUpdateSharedPtr))gOriginalFrameUpdate)(
         self, selector, framebuffer, update);
-    // Mirror rendered frame to external display.
-    if (gExternalMirrorView && gDisplayLayer)
+    // Mirror rendered frame to external display. Skipped while presentation is
+    // suspended: the guest surface must not reach an external display either
+    // while the device is locked.
+    if (gExternalMirrorView && gDisplayLayer && !displayPresentationIsSuppressed())
         gExternalMirrorView.layer.contents = gDisplayLayer.contents;
 }
 
@@ -5032,7 +5583,7 @@ static BOOL prepareFramebuffer(UIView *container) {
         setStatus(VZL(@"The Virtual Mac display view is unavailable"));
         return NO;
     }
-    VZSetNSViewFrameRequestsSuppressed(NO);
+    VZSetNSViewFrameRequestsSuppressed(displayPresentationIsSuppressed());
     gDisplayContainer = container;
     container.clipsToBounds = YES;
     CGRect viewport = displayViewportRect(gDisplayPixelSize, container.bounds);
@@ -5110,7 +5661,10 @@ static void activateFramebuffer(void) {
     id framebuffer = gFramebuffer;
     if (!view || !framebuffer)
         return;
-    VZSetNSViewFrameRequestsSuppressed(NO);
+    // Re-apply the locked-screen state instead of blindly un-suppressing: a VM
+    // that is started (or resumed) while the display is unavailable must not
+    // present frames until the display comes back.
+    updateDisplayPresentationState(YES);
     if ([view respondsToSelector:S("viewDidMoveToWindow")])
         ((void(*)(id, SEL))objc_msgSend)(view, S("viewDidMoveToWindow"));
     if ([view respondsToSelector:S("layout")])
@@ -5177,6 +5731,7 @@ static void startVirtualMachineWorker(UIView *container, id delegate,
     // Consume the one-shot mode at the actual boot boundary. The current boot
     // keeps the captured value while Settings immediately returns to Off.
     gDebugLogging = VZConsumeDebugLoggingForBoot();
+    logSystemPointerSpeedPreferences();
     resetScrollDiagnostics();
     setenv("VZ_DEBUG_LOGGING", gDebugLogging ? "1" : "0", 1);
     setenv("VMMHOOK_TRACE_VCPU_LIMIT", gDebugLogging ? "256" : "8", 1);
@@ -5634,6 +6189,7 @@ static void disconnectExternalDisplay(void) {
     installKeyboardRenderingFix();
     installShellShortcutRelay();
     installVideoMemoryWarningRelay();
+    installLockedScreenSuppression();
     VZTrackpadScrollBridgeConfigure(emitTrackpadScroll, NULL);
     VZSurfaceMouseScrollBridgeConfigure(emitSurfaceMouseScroll, NULL);
     VZTouchScrollBridgeConfigure(emitTouchScroll, NULL);
@@ -5642,6 +6198,9 @@ static void disconnectExternalDisplay(void) {
     gScrollingSpeed = MAX(0.1, MIN(1.0,
         [[VZAppSettings.sharedSettings stringForKey:VZScrollingSpeedKey]
             doubleValue]));
+    applyTrackpadScrollingSpeed();
+    printf("[VirtualMac] scroll settings speed=%.2f trackpad=%.2f\n",
+           gScrollingSpeed, gTrackpadScrollingSpeed);
     self.window = [[[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds]
         autorelease];
     VZViewController *controller =

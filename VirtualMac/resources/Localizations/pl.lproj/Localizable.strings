@@ -143,6 +143,7 @@
 "Learn More" = "Dowiedz się więcej";
 "Library Appearance" = "Wygląd biblioteki";
 "Loading extracted Apple virtualization frameworks…" = "Wczytywanie wyodrębnionych frameworków wirtualizacji Apple…";
+"Lock Pointer to Display" = "Zablokuj wskaźnik na ekranie";
 "MAC Address" = "Adres fizyczny (MAC)";
 "Mac Keyboard" = "Klawiatura Maca";
 "Mac Keyboard Shortcuts" = "Skróty klawiaturowe Maca";
@@ -271,6 +272,7 @@
 "Touch" = "Dotyk";
 "Touch and Hold Right Click" = "Dotknij i przytrzymaj, aby kliknąć prawym";
 "Touch and Hold to Secondary Click" = "Dotknij i przytrzymaj, aby uzyskać dodatkowe kliknięcie";
+"Trackpad Scrolling Speed" = "Szybkość przewijania gładzika";
 "Turn Off Virtual Mac Guest Tools?" = "Wyłączyć narzędzia gościa Virtual Mac?";
 "Two Finger Tap Right Click" = "Stuknij dwoma palcami, aby kliknąć prawym";
 "Two Finger Tap to Secondary Click" = "Stuknięcie dwoma palcami w celu uzyskania dodatkowego kliknięcia";

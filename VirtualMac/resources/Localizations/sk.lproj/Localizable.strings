@@ -143,6 +143,7 @@
 "Learn More" = "Ďalšie informácie";
 "Library Appearance" = "Vzhled knižnice";
 "Loading extracted Apple virtualization frameworks…" = "Načítavanie extrahovaných frameworkov Apple na virtualizáciu…";
+"Lock Pointer to Display" = "Uzamknúť ukazovateľ na obrazovke";
 "MAC Address" = "MAC adresa";
 "Mac Keyboard" = "Klávesnica Mac";
 "Mac Keyboard Shortcuts" = "Klávesové skratky pre Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Dotyk";
 "Touch and Hold Right Click" = "Podržanie ako pravé kliknutie";
 "Touch and Hold to Secondary Click" = "Dotknite sa a podržte pre sekundárne kliknutie";
+"Trackpad Scrolling Speed" = "Rýchlosť posúvania trackpadu";
 "Turn Off Virtual Mac Guest Tools?" = "Vypnúť hosťovské nástroje Virtual Mac?";
 "Two Finger Tap Right Click" = "Klepnutie dvoma prstami ako pravé kliknutie";
 "Two Finger Tap to Secondary Click" = "Ťuknutie dvoma prstami pre sekundárne kliknutie";

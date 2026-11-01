@@ -22,6 +22,8 @@ NSString * const VZShowCursorWhenUsingTouchKey = @"ShowCursorWhenUsingTouch";
 NSString * const VZKeyboardCrashWorkaroundKey = @"KeyboardCrashWorkaround";
 NSString * const VZExternalDisplayScrollFixKey = @"ExternalDisplayScrollFix";
 NSString * const VZScrollingSpeedKey = @"ScrollingSpeed";
+NSString * const VZTrackpadScrollingSpeedKey = @"TrackpadScrollingSpeed";
+NSString * const VZPointerLockKey = @"PointerLock";
 NSString * const VZHUDOpacityKey = @"HUDOpacity";
 NSString * const VZDebugLoggingKey = @"DebugLogging";
 NSString * const VZDebugLoggingModeOff = @"off";
@@ -105,6 +107,14 @@ BOOL VZIsRootHideEnvironment(void)
         VZKeyboardCrashWorkaroundKey: @YES,
         VZExternalDisplayScrollFixKey: @YES,
         VZScrollingSpeedKey: @"0.25",
+        // The reconstructed Ventura trackpad curve is tuned for a full-size
+        // Mac trackpad; the much shorter Magic Keyboard surface covers the
+        // same distance in far less finger travel, so start it slower.
+        VZTrackpadScrollingSpeedKey: @"0.5",
+        // Off by default: the lock only works while some motion source keeps
+        // reaching the app (trackpad hover deltas, or a GCMouse). A locked
+        // pointer with neither leaves the user without any pointer at all.
+        VZPointerLockKey: @NO,
         VZHUDOpacityKey: @"0.55",
         VZDebugLoggingKey: VZDebugLoggingModeOff,
     };

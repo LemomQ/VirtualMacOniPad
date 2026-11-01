@@ -143,6 +143,7 @@
 "Learn More" = "進一步瞭解";
 "Library Appearance" = "資料庫外觀";
 "Loading extracted Apple virtualization frameworks…" = "正在載入已提取的Apple虛擬化框架…";
+"Lock Pointer to Display" = "鎖定指標至顯示畫面";
 "MAC Address" = "MAC地址";
 "Mac Keyboard" = "Mac鍵盤";
 "Mac Keyboard Shortcuts" = "Mac鍵盤快速鍵";
@@ -271,6 +272,7 @@
 "Touch" = "觸控";
 "Touch and Hold Right Click" = "觸碰並按住以按右鍵";
 "Touch and Hold to Secondary Click" = "觸碰並按住以使用輔助按鈕";
+"Trackpad Scrolling Speed" = "觸控板捲動速度";
 "Turn Off Virtual Mac Guest Tools?" = "關閉虛擬Mac客體工具？";
 "Two Finger Tap Right Click" = "雙指觸碰以按右鍵";
 "Two Finger Tap to Secondary Click" = "用兩指點一下以使用輔助按鈕";

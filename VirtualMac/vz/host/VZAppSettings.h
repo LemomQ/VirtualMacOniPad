@@ -24,6 +24,8 @@ FOUNDATION_EXPORT NSString * const VZShowCursorWhenUsingTouchKey;
 FOUNDATION_EXPORT NSString * const VZKeyboardCrashWorkaroundKey;
 FOUNDATION_EXPORT NSString * const VZExternalDisplayScrollFixKey;
 FOUNDATION_EXPORT NSString * const VZScrollingSpeedKey;
+FOUNDATION_EXPORT NSString * const VZTrackpadScrollingSpeedKey;
+FOUNDATION_EXPORT NSString * const VZPointerLockKey;
 FOUNDATION_EXPORT NSString * const VZHUDOpacityKey;
 FOUNDATION_EXPORT NSString * const VZDebugLoggingKey;
 FOUNDATION_EXPORT NSString * const VZDebugLoggingModeOff;

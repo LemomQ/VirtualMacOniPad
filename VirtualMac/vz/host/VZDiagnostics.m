@@ -470,6 +470,10 @@ static NSData *VZRuntimePathData(void)
         @"/usr/lib/TweakInject/VZKeyboardPassthrough.dylib",
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries/VZKeyboardPassthrough.dylib",
         @"/var/jb/usr/lib/TweakInject/VZKeyboardPassthrough.dylib",
+        @"/Library/MobileSubstrate/DynamicLibraries/VZLowPower.dylib",
+        @"/usr/lib/TweakInject/VZLowPower.dylib",
+        @"/var/jb/Library/MobileSubstrate/DynamicLibraries/VZLowPower.dylib",
+        @"/var/jb/usr/lib/TweakInject/VZLowPower.dylib",
         @"/var/run/usbmuxd",
         @"/tmp/vzusbmuxd",
     ];
@@ -493,6 +497,38 @@ static NSData *VZRuntimePathData(void)
     return [report dataUsingEncoding:NSUTF8StringEncoding];
 }
 
+// Guest RAM is the dominant non-reclaimable term on the host. iPadOS 15/16 force
+// a SystemMemoryReset (bug_type 301) once "user reclaimable memory" drops below
+// its 65% floor, and that reset takes the VMM and the host app down together.
+// State every bundle's configured size next to physical RAM so a diagnostics
+// export carries the ratio directly instead of requiring the crash reports to be
+// parsed before the cause is visible.
+static NSString *VZGuestMemorySummary(void)
+{
+    uint64_t physical = NSProcessInfo.processInfo.physicalMemory;
+    NSMutableArray *entries = [NSMutableArray array];
+    NSArray *bundles = [NSFileManager.defaultManager
+        contentsOfDirectoryAtPath:VZDiagnosticsLibraryPath() error:nil];
+    for (NSString *name in bundles) {
+        if (![name.pathExtension.lowercaseString isEqualToString:@"bundle"])
+            continue;
+        NSString *configurationPath = [[VZDiagnosticsLibraryPath()
+            stringByAppendingPathComponent:name]
+            stringByAppendingPathComponent:@"VirtualMac.plist"];
+        NSDictionary *configuration = [NSDictionary
+            dictionaryWithContentsOfFile:configurationPath];
+        uint64_t memory = [configuration[@"MemorySize"] unsignedLongLongValue];
+        if (!memory)
+            continue;
+        [entries addObject:[NSString stringWithFormat:@"%@=%lluMiB",
+                            name, memory >> 20]];
+    }
+    if (!entries.count)
+        return @"(no VM bundles)";
+    return [NSString stringWithFormat:@"%@ physical=%lluMiB",
+            [entries componentsJoinedByString:@" "], physical >> 20];
+}
+
 static void VZEnumerateDiagnosticEntries(VZDiagnosticEntryHandler handler)
 {
     struct utsname systemInfo = {0};
@@ -512,7 +548,8 @@ static void VZEnumerateDiagnosticEntries(VZDiagnosticEntryHandler handler)
     NSString *manifest = [NSString stringWithFormat:
         @"Virtual Mac diagnostics\n"
          "Created: %@\nApp version: %@ (%@)\nDevice: %s\n"
-         "%@: %@ (%@)\nPhysical memory: %llu\nFree storage: %@\n"
+         "%@: %@ (%@)\nPhysical memory: %llu\nGuest memory: %@\n"
+         "Free storage: %@\n"
          "Total storage: %@\nUptime: %.0f seconds\nThermal state: %ld\n"
          "Low Power Mode: %@\nProtected data available: %@\n"
          "Application state: %ld\nScreen bounds: %@\nNative bounds: %@\n"
@@ -524,6 +561,7 @@ static void VZEnumerateDiagnosticEntries(VZDiagnosticEntryHandler handler)
             ? @"iOS" : @"iPadOS",
         NSProcessInfo.processInfo.operatingSystemVersionString, osBuild,
         (unsigned long long)NSProcessInfo.processInfo.physicalMemory,
+        VZGuestMemorySummary(),
         fileSystem[NSFileSystemFreeSize] ?: @"unknown",
         fileSystem[NSFileSystemSize] ?: @"unknown",
         NSProcessInfo.processInfo.systemUptime,
@@ -607,6 +645,7 @@ static void VZEnumerateDiagnosticEntries(VZDiagnosticEntryHandler handler)
 
     NSArray *logNames = @[@"VirtualMac.log", @"vmmhook.log",
         @"vmm.stderr.log", @"vzxpchook.log", @"pvg-trace.log",
+        @"vz-springboard-shortcuts.log", @"VZLowPower.log",
         @"InternetSharing.stdout.log", @"InternetSharing.stderr.log",
         @"bootpd.stdout.log", @"bootpd.stderr.log",
         @"InternetSharing.out", @"InternetSharing.err",
@@ -615,6 +654,11 @@ static void VZEnumerateDiagnosticEntries(VZDiagnosticEntryHandler handler)
     for (NSString *name in logNames)
         VZAddEntry(handler, [@"logs" stringByAppendingPathComponent:name],
             VZBoundedFileData([@"/tmp" stringByAppendingPathComponent:name]));
+
+    // VZLowPower keeps its log on the data partition because /tmp does not
+    // survive the SystemMemoryReset it is meant to record. Collect both.
+    VZAddEntry(handler, @"logs/VZLowPower-persistent.log",
+        VZBoundedFileData(@"/var/mobile/Library/Logs/VZLowPower.log"));
 
     NSArray *temporary = [NSFileManager.defaultManager
         contentsOfDirectoryAtPath:@"/tmp" error:nil];

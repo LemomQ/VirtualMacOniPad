@@ -1,0 +1,90 @@
+#!/bin/sh
+# 把滚动修复替换包装进已有的 Virtual Mac，并注册新的 CDHash。
+#
+# 在本目录（含 VirtualMac 与 VZHostCompat.dylib）中执行：
+#
+#     sh install-on-ipad.sh
+#
+# 无根越狱（Dopamine）与有根越狱（Taurine）两种布局都会自动识别。
+# 脚本不会 respring；执行完成后从主屏幕启动 Virtual Mac 即可。
+
+set -eu
+
+MAIN_CDHASH="@MAIN_CDHASH@"
+HOOK_CDHASH="@HOOK_CDHASH@"
+
+directory="$(cd "$(dirname "$0")" && pwd)"
+test -f "$directory/VirtualMac"
+test -f "$directory/VZHostCompat.dylib"
+
+if test -x /var/jb/usr/bin/jbctl; then
+    prefix=/var/jb
+    app=/var/jb/Applications/VirtualMac.app
+else
+    prefix=""
+    app=/Applications/VirtualMac.app
+fi
+test -d "$app" || { echo "未找到 Virtual Mac.app" >&2; exit 1; }
+
+# Taurine 会按 vnode 缓存代码签名状态：原地覆盖已执行过的 Mach-O 可能让旧校验
+# 继续附着在新文件上，从而报 EAUTH。因此每次替换都走新 inode。
+replace_file() {
+    cp "$1" "$2.virtualmac-new"
+    chmod 755 "$2.virtualmac-new"
+    chown 0:0 "$2.virtualmac-new" 2>/dev/null || true
+    mv -f "$2.virtualmac-new" "$2"
+}
+
+backup="$app/ScrollReplacementBackup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+cp -p "$app/VirtualMac" "$app/VZHostCompat.dylib" "$backup/"
+echo "已把原有二进制备份到 $backup"
+
+replace_file "$directory/VirtualMac" "$app/VirtualMac"
+replace_file "$directory/VZHostCompat.dylib" "$app/VZHostCompat.dylib"
+
+# The Info.plist carries keys that only take effect when the bundle's plist is
+# replaced: UIRequiresFullScreen (opt out of Split View / Slide Over on iPadOS 18
+# and earlier, which also stops the top multitasking affordance from appearing)
+# and, in packages that add it, UIBackgroundModes (keep running while the screen
+# is locked). Replacing it needs a uicache so SpringBoard re-reads the bundle.
+replaced_plist=0
+if test -f "$directory/Info.plist"; then
+    cp -f "$app/Info.plist" "$backup/Info.plist" 2>/dev/null || true
+    cp -f "$directory/Info.plist" "$app/Info.plist.virtualmac-new"
+    chmod 644 "$app/Info.plist.virtualmac-new"
+    chown 0:0 "$app/Info.plist.virtualmac-new" 2>/dev/null || true
+    mv -f "$app/Info.plist.virtualmac-new" "$app/Info.plist"
+    replaced_plist=1
+    if grep -q UIBackgroundModes "$app/Info.plist" 2>/dev/null; then
+        echo "已替换 Info.plist（UIRequiresFullScreen、UIBackgroundModes）"
+    else
+        echo "已替换 Info.plist（UIRequiresFullScreen）"
+    fi
+fi
+
+if test -x /var/jb/usr/bin/jbctl; then
+    /var/jb/usr/bin/jbctl trustcache add "$MAIN_CDHASH"
+    /var/jb/usr/bin/jbctl trustcache add "$HOOK_CDHASH"
+    echo "已用 jbctl 注册两个 CDHash"
+elif test -x /taurine/jbexec; then
+    # Taurine 会用 jailbreakd 预检特权平台二进制；它的诊断性 spawn 即使成功
+    # 也可能返回 EPERM，因此忽略退出码。
+    PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+        "$app/VirtualMac" >/dev/null || true
+    PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+        "$app/VZHostCompat.dylib" >/dev/null || true
+    echo "已用 jbexec 预检两个二进制"
+else
+    echo "警告：未找到 jbctl 或 jbexec，请手动注册以下 CDHash：" >&2
+    echo "  $MAIN_CDHASH" >&2
+    echo "  $HOOK_CDHASH" >&2
+fi
+
+if test -x "$prefix/usr/bin/uicache"; then
+    "$prefix/usr/bin/uicache" -p "$app" >/dev/null 2>&1 || true
+fi
+
+echo "安装完成。请从主屏幕启动 Virtual Mac。"
+echo "如需回滚：把 $backup/VirtualMac 与 $backup/VZHostCompat.dylib"
+echo "拷回 $app，并重新注册恢复后的 CDHash。"

@@ -143,6 +143,7 @@
 "Learn More" = "Saznajte više";
 "Library Appearance" = "Izgled medijateke";
 "Loading extracted Apple virtualization frameworks…" = "Učitavanje izdvojenih Appleovih frameworka za virtualizaciju…";
+"Lock Pointer to Display" = "Zaključaj pokazivač na zaslonu";
 "MAC Address" = "MAC adresa";
 "Mac Keyboard" = "Mac tipkovnica";
 "Mac Keyboard Shortcuts" = "Tipkovnički prečaci za Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Dodir";
 "Touch and Hold Right Click" = "Dodir i držanje za desni klik";
 "Touch and Hold to Secondary Click" = "Dodirnite i držite za sekundarni klik";
+"Trackpad Scrolling Speed" = "Brzina pomicanja dodirne plohe";
 "Turn Off Virtual Mac Guest Tools?" = "Isključiti gostujuće alate za Virtual Mac?";
 "Two Finger Tap Right Click" = "Dodir s dva prsta za desni klik";
 "Two Finger Tap to Secondary Click" = "Dodir s dva prsta za sekundarni klik";

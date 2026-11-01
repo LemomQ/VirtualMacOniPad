@@ -143,6 +143,7 @@
 "Learn More" = "Finn ut mer";
 "Library Appearance" = "Bibliotekutseende";
 "Loading extracted Apple virtualization frameworks…" = "Laster inn utpakkede Apple-rammeverk for virtualisering…";
+"Lock Pointer to Display" = "Lås pekeren til skjermen";
 "MAC Address" = "MAC-adresse";
 "Mac Keyboard" = "Mac-tastatur";
 "Mac Keyboard Shortcuts" = "Mac-tastatursnarveier";
@@ -271,6 +272,7 @@
 "Touch" = "Berøring";
 "Touch and Hold Right Click" = "Trykk og hold for høyreklikk";
 "Touch and Hold to Secondary Click" = "Trykk og hold for sekundært klikk";
+"Trackpad Scrolling Speed" = "Rullehastighet for styreflate";
 "Turn Off Virtual Mac Guest Tools?" = "Slå av Virtual Mac-gjesteverktøy?";
 "Two Finger Tap Right Click" = "Trykk med to fingre for høyreklikk";
 "Two Finger Tap to Secondary Click" = "Trykk med to fingre for sekundært klikk";

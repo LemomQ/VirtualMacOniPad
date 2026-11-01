@@ -143,6 +143,7 @@
 "Learn More" = "Pelajari Lebih Lanjut";
 "Library Appearance" = "Tampilan Perpustakaan";
 "Loading extracted Apple virtualization frameworks…" = "Memuat framework virtualisasi Apple yang diekstrak…";
+"Lock Pointer to Display" = "Kunci penunjuk ke layar";
 "MAC Address" = "Alamat MAC";
 "Mac Keyboard" = "Papan Ketik Mac";
 "Mac Keyboard Shortcuts" = "Pintasan Keyboard Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Sentuh";
 "Touch and Hold Right Click" = "Sentuh dan Tahan untuk Klik Kanan";
 "Touch and Hold to Secondary Click" = "Sentuh dan Tahan untuk Klik Sekunder";
+"Trackpad Scrolling Speed" = "Kecepatan Gulir Trackpad";
 "Turn Off Virtual Mac Guest Tools?" = "Matikan Alat Tamu Virtual Mac?";
 "Two Finger Tap Right Click" = "Ketuk Dua Jari untuk Klik Kanan";
 "Two Finger Tap to Secondary Click" = "Ketuk Dua Jari untuk Klik Sekunder";

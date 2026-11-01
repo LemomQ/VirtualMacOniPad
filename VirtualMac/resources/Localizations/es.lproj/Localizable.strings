@@ -143,6 +143,7 @@
 "Learn More" = "Más información";
 "Library Appearance" = "Aspecto de la biblioteca";
 "Loading extracted Apple virtualization frameworks…" = "Cargando los frameworks de virtualización de Apple extraídos…";
+"Lock Pointer to Display" = "Bloquear el puntero en la pantalla";
 "MAC Address" = "Dirección MAC";
 "Mac Keyboard" = "Teclado Mac";
 "Mac Keyboard Shortcuts" = "Atajos de teclado de Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Tacto";
 "Touch and Hold Right Click" = "Mantener pulsado para hacer clic derecho";
 "Touch and Hold to Secondary Click" = "Toque y mantenga presionado para hacer un clic secundario";
+"Trackpad Scrolling Speed" = "Velocidad de desplazamiento del trackpad";
 "Turn Off Virtual Mac Guest Tools?" = "¿Desactivar las herramientas de invitado de Virtual Mac?";
 "Two Finger Tap Right Click" = "Tocar con dos dedos para hacer clic derecho";
 "Two Finger Tap to Secondary Click" = "Toque con dos dedos para hacer clic secundario";

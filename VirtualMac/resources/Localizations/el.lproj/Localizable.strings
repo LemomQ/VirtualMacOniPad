@@ -143,6 +143,7 @@
 "Learn More" = "Μάθετε περισσότερα";
 "Library Appearance" = "Εμφάνιση βιβλιοθήκης";
 "Loading extracted Apple virtualization frameworks…" = "Φόρτωση εξαχθέντων framework εικονικοποίησης της Apple…";
+"Lock Pointer to Display" = "Κλείδωμα δείκτη στην οθόνη";
 "MAC Address" = "Διεύθυνση MAC";
 "Mac Keyboard" = "Πληκτρολόγιο Mac";
 "Mac Keyboard Shortcuts" = "Συντομεύσεις πληκτρολογίου Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Αφή";
 "Touch and Hold Right Click" = "Παρατεταμένο άγγιγμα για δεξί κλικ";
 "Touch and Hold to Secondary Click" = "Αγγίξτε παρατεταμένα για δευτερεύον κλικ";
+"Trackpad Scrolling Speed" = "Ταχύτητα κύλισης επιφάνειας αφής";
 "Turn Off Virtual Mac Guest Tools?" = "Απενεργοποίηση εργαλείων επισκέπτη Virtual Mac;";
 "Two Finger Tap Right Click" = "Άγγιγμα με δύο δάχτυλα για δεξί κλικ";
 "Two Finger Tap to Secondary Click" = "Πατήστε με δύο δάχτυλα για δευτερεύον κλικ";

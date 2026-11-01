@@ -143,6 +143,7 @@
 "Learn More" = "Подробнее";
 "Library Appearance" = "Вид библиотеки";
 "Loading extracted Apple virtualization frameworks…" = "Загрузка извлечённых фреймворков виртуализации Apple…";
+"Lock Pointer to Display" = "Закрепить указатель на экране";
 "MAC Address" = "MAC Адрес";
 "Mac Keyboard" = "Клавиатура Mac";
 "Mac Keyboard Shortcuts" = "Сочетания клавиш Mac";
@@ -271,6 +272,7 @@
 "Touch" = "Касание";
 "Touch and Hold Right Click" = "Удержание для правого клика";
 "Touch and Hold to Secondary Click" = "Нажмите и удерживайте для вторичного щелчка";
+"Trackpad Scrolling Speed" = "Скорость прокрутки трекпада";
 "Turn Off Virtual Mac Guest Tools?" = "Выключить гостевые инструменты Virtual Mac?";
 "Two Finger Tap Right Click" = "Касание двумя пальцами для правого клика";
 "Two Finger Tap to Secondary Click" = "Касание двумя пальцами для вторичного щелчка";

@@ -143,6 +143,7 @@
 "Learn More" = "ดูเพิ่มเติม";
 "Library Appearance" = "ลักษณะคลัง";
 "Loading extracted Apple virtualization frameworks…" = "กำลังโหลดเฟรมเวิร์กการจำลองเสมือนของ Apple ที่แยกออกมา…";
+"Lock Pointer to Display" = "ล็อกตัวชี้ไว้บนหน้าจอ";
 "MAC Address" = "ที่อยู่ MAC";
 "Mac Keyboard" = "แป้นพิมพ์ Mac";
 "Mac Keyboard Shortcuts" = "แป้นพิมพ์ลัด Mac";
@@ -271,6 +272,7 @@
 "Touch" = "การสัมผัส";
 "Touch and Hold Right Click" = "แตะค้างเพื่อคลิกขวา";
 "Touch and Hold to Secondary Click" = "แตะค้างไว้เพื่อคลิกรอง";
+"Trackpad Scrolling Speed" = "ความเร็วการเลื่อนของแทร็คแพด";
 "Turn Off Virtual Mac Guest Tools?" = "ปิดเครื่องมือเกสต์ของ Virtual Mac หรือไม่";
 "Two Finger Tap Right Click" = "แตะสองนิ้วเพื่อคลิกขวา";
 "Two Finger Tap to Secondary Click" = "แตะสองนิ้วเพื่อคลิกรอง";

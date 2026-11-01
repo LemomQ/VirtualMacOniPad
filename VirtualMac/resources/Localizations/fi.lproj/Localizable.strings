@@ -143,6 +143,7 @@
 "Learn More" = "Lisätietoja";
 "Library Appearance" = "Kirjaston ulkoasu";
 "Loading extracted Apple virtualization frameworks…" = "Purettuja Applen virtualisointikehyksiä ladataan…";
+"Lock Pointer to Display" = "Lukitse osoitin näyttöön";
 "MAC Address" = "Mac osoite";
 "Mac Keyboard" = "Mac-näppäimistö";
 "Mac Keyboard Shortcuts" = "Macin pikanäppäimet";
@@ -271,6 +272,7 @@
 "Touch" = "Kosketus";
 "Touch and Hold Right Click" = "Pidä painettuna oikeaa klikkausta varten";
 "Touch and Hold to Secondary Click" = "Kosketa pitkään toissijaista napsautusta varten";
+"Trackpad Scrolling Speed" = "Ohjauslevyn vieritysnopeus";
 "Turn Off Virtual Mac Guest Tools?" = "Poistetaanko Virtual Macin vierastyökalut käytöstä?";
 "Two Finger Tap Right Click" = "Napauta kahdella sormella oikeaa klikkausta varten";
 "Two Finger Tap to Secondary Click" = "Kahden sormen napautus toissijaista napsautusta varten";

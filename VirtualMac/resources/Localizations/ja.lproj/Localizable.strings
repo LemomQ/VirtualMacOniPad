@@ -143,6 +143,7 @@
 "Learn More" = "詳しく見る";
 "Library Appearance" = "ライブラリの表示";
 "Loading extracted Apple virtualization frameworks…" = "抽出したApple仮想化フレームワークを読み込み中…";
+"Lock Pointer to Display" = "ポインタを画面に固定";
 "MAC Address" = "MACアドレス";
 "Mac Keyboard" = "Macキーボード";
 "Mac Keyboard Shortcuts" = "Macのキーボードショートカット";
@@ -271,6 +272,7 @@
 "Touch" = "タッチ";
 "Touch and Hold Right Click" = "長押しで右クリック";
 "Touch and Hold to Secondary Click" = "タッチして押さえたままにして副ボタンのクリック";
+"Trackpad Scrolling Speed" = "トラックパッドのスクロール速度";
 "Turn Off Virtual Mac Guest Tools?" = "Virtual Macゲストツールをオフにしますか？";
 "Two Finger Tap Right Click" = "2本指タップで右クリック";
 "Two Finger Tap to Secondary Click" = "2本指でタップして副ボタンのクリック";
