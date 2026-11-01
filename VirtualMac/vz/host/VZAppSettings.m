@@ -18,9 +18,12 @@ NSString * const VZTouchDoubleTapAccommodationKey = @"TouchDoubleTapAccommodatio
 NSString * const VZTouchTwoFingerScrollingKey = @"TouchTwoFingerScrolling";
 NSString * const VZTouchTwoFingerRightClickKey = @"TouchTwoFingerRightClick";
 NSString * const VZTouchLongPressRightClickKey = @"TouchLongPressRightClick";
+NSString * const VZShowCursorWhenUsingTouchKey = @"ShowCursorWhenUsingTouch";
 NSString * const VZKeyboardCrashWorkaroundKey = @"KeyboardCrashWorkaround";
 NSString * const VZExternalDisplayScrollFixKey = @"ExternalDisplayScrollFix";
 NSString * const VZScrollingSpeedKey = @"ScrollingSpeed";
+NSString * const VZTrackpadScrollingSpeedKey = @"TrackpadScrollingSpeed";
+NSString * const VZPointerLockKey = @"PointerLock";
 NSString * const VZHUDOpacityKey = @"HUDOpacity";
 NSString * const VZDebugLoggingKey = @"DebugLogging";
 NSString * const VZDebugLoggingModeOff = @"off";
@@ -100,9 +103,18 @@ BOOL VZIsRootHideEnvironment(void)
         VZTouchTwoFingerScrollingKey: @YES,
         VZTouchTwoFingerRightClickKey: @YES,
         VZTouchLongPressRightClickKey: @NO,
+        VZShowCursorWhenUsingTouchKey: @YES,
         VZKeyboardCrashWorkaroundKey: @YES,
         VZExternalDisplayScrollFixKey: @YES,
         VZScrollingSpeedKey: @"0.25",
+        // The reconstructed Ventura trackpad curve is tuned for a full-size
+        // Mac trackpad; the much shorter Magic Keyboard surface covers the
+        // same distance in far less finger travel, so start it slower.
+        VZTrackpadScrollingSpeedKey: @"0.5",
+        // Off by default: the lock only works while some motion source keeps
+        // reaching the app (trackpad hover deltas, or a GCMouse). A locked
+        // pointer with neither leaves the user without any pointer at all.
+        VZPointerLockKey: @NO,
         VZHUDOpacityKey: @"0.55",
         VZDebugLoggingKey: VZDebugLoggingModeOff,
     };
@@ -183,12 +195,25 @@ BOOL VZIsRootHideEnvironment(void)
 
 BOOL VZConsumeDebugLoggingForBoot(void)
 {
-    VZAppSettings *settings = VZAppSettings.sharedSettings;
-    NSString *mode = [settings stringForKey:VZDebugLoggingKey];
-    BOOL enabled = [mode isEqualToString:VZDebugLoggingModeAlways] ||
-        [mode isEqualToString:VZDebugLoggingModeNextBoot];
-    if ([mode isEqualToString:VZDebugLoggingModeNextBoot])
-        [settings setString:VZDebugLoggingModeOff forKey:VZDebugLoggingKey];
+    __block BOOL enabled = NO;
+    void (^consume)(void) = ^{
+        VZAppSettings *settings = VZAppSettings.sharedSettings;
+        NSString *mode = [settings stringForKey:VZDebugLoggingKey];
+        enabled = [mode isEqualToString:VZDebugLoggingModeAlways] ||
+            [mode isEqualToString:VZDebugLoggingModeNextBoot];
+        if ([mode isEqualToString:VZDebugLoggingModeNextBoot])
+            [settings setString:VZDebugLoggingModeOff
+                         forKey:VZDebugLoggingKey];
+    };
+    // VM construction runs on a worker queue. Consuming the one-shot setting
+    // posts VZSettingsDidChangeNotification, whose observers update UIKit and
+    // FrontBoard scene state. iPadOS 14 aborts if that notification is sent
+    // from the worker. Keep settings mutation and notification delivery on
+    // the main thread; later VMM construction remains off-main.
+    if (NSThread.isMainThread)
+        consume();
+    else
+        dispatch_sync(dispatch_get_main_queue(), consume);
     return enabled;
 }
 

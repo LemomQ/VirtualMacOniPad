@@ -1,0 +1,63 @@
+#!/bin/sh
+# 把「锁屏抑制基线 + 诊断可观测性修复」的主二进制装进已有的 Virtual Mac，
+# 并注册新的 CDHash。
+#
+# 在设备上（或通过 ssh）于本目录执行：
+#
+#     sh install-on-ipad.sh
+#
+# 只替换 VirtualMac 一个文件；VZHostCompat.dylib 与 Info.plist 保持原样，
+# 因此不需要重新注册它们的信任缓存。无根越狱（Dopamine）与有根越狱
+# （Taurine）两种布局都会自动识别。脚本不会 respring。
+
+set -eu
+
+MAIN_CDHASH="@MAIN_CDHASH@"
+PREVIOUS_CDHASH="@PREVIOUS_CDHASH@"
+
+directory="$(cd "$(dirname "$0")" && pwd)"
+test -f "$directory/VirtualMac" || { echo "缺少 VirtualMac" >&2; exit 1; }
+
+if test -x /var/jb/usr/bin/jbctl; then
+    prefix=/var/jb
+    app=/var/jb/Applications/VirtualMac.app
+else
+    prefix=""
+    app=/Applications/VirtualMac.app
+fi
+test -d "$app" || { echo "未找到 Virtual Mac.app" >&2; exit 1; }
+
+backup="$app/LockScreenDiagBackup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+cp -p "$app/VirtualMac" "$backup/"
+echo "已把原有二进制备份到 $backup"
+
+# Taurine 会按 vnode 缓存代码签名状态：原地覆盖已执行过的 Mach-O 可能让旧
+# 校验继续附着在新文件上，从而报 EAUTH。因此替换走新 inode。
+cp "$directory/VirtualMac" "$app/VirtualMac.virtualmac-new"
+chmod 755 "$app/VirtualMac.virtualmac-new"
+chown 0:0 "$app/VirtualMac.virtualmac-new" 2>/dev/null || true
+mv -f "$app/VirtualMac.virtualmac-new" "$app/VirtualMac"
+echo "已替换 $app/VirtualMac"
+
+if test -x /var/jb/usr/bin/jbctl; then
+    /var/jb/usr/bin/jbctl trustcache add "$MAIN_CDHASH"
+    echo "已用 jbctl 注册 CDHash"
+elif test -x /taurine/jbexec; then
+    # Taurine 用 jailbreakd 预检特权平台二进制；诊断性 spawn 即使成功也可能
+    # 返回 EPERM，所以忽略退出码。
+    PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+        "$app/VirtualMac" >/dev/null || true
+    echo "已用 jbexec 预检主二进制"
+else
+    echo "警告：未找到 jbctl 或 jbexec，请手动注册 CDHash：" >&2
+    echo "  $MAIN_CDHASH" >&2
+fi
+
+if test -x "$prefix/usr/bin/uicache"; then
+    "$prefix/usr/bin/uicache" -p "$app" >/dev/null 2>&1 || true
+fi
+
+echo "安装完成。请从主屏幕启动 Virtual Mac。"
+echo "如需回滚：把 $backup/VirtualMac 拷回 $app，并重新注册旧 CDHash"
+echo "  $PREVIOUS_CDHASH"

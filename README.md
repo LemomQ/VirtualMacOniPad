@@ -32,10 +32,15 @@ Magic Keyboard is not required because you can also use the touchscreen and virt
 - To access the virtual keyboard, tap the keyboard icon. If the virtual keyboard gets in the way, press and hold the bottom-right icon to switch to Floating mode.
 - If the HUD gets in the way, move it to a different corner or hide it from the More menu. To show it again, press and hold the Virtual Mac icon on the iPad Home Screen, then tap Show Virtual Mac Controls.
 - To automatically start up your virtual Mac, enable System Settings > Users & Groups > Automatically log in, and set System Settings > Lock Screen to Never. Then in Virtual Mac's in-app Settings, change Start on Launch from Show Library to the name of your virtual Mac. To show library again, press and hold the Virtual Mac icon on the iPad Home Screen, then tap Show Library.
+- If your Magic Keyboard doesn't have a hardware Escape key, press Command + Period (⌘ + .) instead. You can also map another key to Escape in Settings > General > Keyboard > Hardware Keyboard > Modifier Keys.
 
 ### Is it possible to support newer versions of iPadOS?
 
 Supporting iPadOS 16.4 or later presents additional challenges because [Hypervisor support was removed from the iPadOS XNU kernel](https://x.com/UTMapp/status/1708907045314035986). Contributions are welcome!
+
+### Does Virtual Mac on iPad work on iPhone?
+
+Even though iPad is the primary supported platform, Virtual Mac on iPad also works on iPhone 14 Pro and iPhone 14 Pro Max running iOS 16 up to iOS 16.3.1.
 
 ### What kind of performance does Virtual Mac on iPad offer?
 

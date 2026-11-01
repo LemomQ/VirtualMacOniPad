@@ -629,23 +629,30 @@ static BOOL TraceDeleteTaskID(id self, SEL selector, uint32_t taskID) {
 static void TraceCommandBufferCommit(id self, SEL selector) {
     uint64_t commit = __atomic_add_fetch(
         &gMetalCommandBufferCommits, 1, __ATOMIC_RELAXED);
-    [self addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
-        uint64_t completion = __atomic_add_fetch(
-            &gMetalCommandBufferCompletions, 1, __ATOMIC_RELAXED);
-        MTLCommandBufferStatus status = commandBuffer.status;
-        NSError *error = commandBuffer.error;
-        if (status == MTLCommandBufferStatusError || error != nil) {
-            uint64_t errors = __atomic_add_fetch(
-                &gMetalCommandBufferErrors, 1, __ATOMIC_RELAXED);
-            Trace(@"METAL_COMMAND_BUFFER\terror=%llu\tcommit=%llu"
-                  "\tcompletion=%llu\tstatus=%lu\tdescription=%@",
-                  (unsigned long long)errors,
-                  (unsigned long long)commit,
-                  (unsigned long long)completion,
-                  (unsigned long)status,
-                  error);
-        }
-    }];
+    // Adding a heap-allocated completion block to every PVG command buffer
+    // changes graphics timing under load. Debug Logging samples startup and
+    // then one in 256 buffers, retaining useful error evidence without making
+    // the diagnostic itself a graphics hot path.
+    if (commit <= 32 || commit % 256 == 0) {
+        [self addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
+            uint64_t completion = __atomic_add_fetch(
+                &gMetalCommandBufferCompletions, 1, __ATOMIC_RELAXED);
+            MTLCommandBufferStatus status = commandBuffer.status;
+            NSError *error = commandBuffer.error;
+            if (status == MTLCommandBufferStatusError || error != nil) {
+                uint64_t errors = __atomic_add_fetch(
+                    &gMetalCommandBufferErrors, 1, __ATOMIC_RELAXED);
+                Trace(@"METAL_COMMAND_BUFFER\terror=%llu\tcommit=%llu"
+                      "\tsampled-completion=%llu\tstatus=%lu"
+                      "\tdescription=%@",
+                      (unsigned long long)errors,
+                      (unsigned long long)commit,
+                      (unsigned long long)completion,
+                      (unsigned long)status,
+                      error);
+            }
+        }];
+    }
     gOriginalCommandBufferCommit(self, selector);
 }
 
@@ -676,7 +683,8 @@ static void InstallCommandBufferTrace(id<MTLDevice> device) {
         10 * NSEC_PER_SEC,
         NSEC_PER_SEC / 2);
     dispatch_source_set_event_handler(gMetalHealthTimer, ^{
-        Trace(@"METAL_HEALTH\tcommits=%llu\tcompletions=%llu\terrors=%llu",
+        Trace(@"METAL_HEALTH\tcommits=%llu\tsampled-completions=%llu"
+              "\tsampled-errors=%llu",
               (unsigned long long)__atomic_load_n(
                   &gMetalCommandBufferCommits, __ATOMIC_RELAXED),
               (unsigned long long)__atomic_load_n(

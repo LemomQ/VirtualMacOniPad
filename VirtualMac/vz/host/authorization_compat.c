@@ -221,7 +221,55 @@ static Boolean compatSMJobSetEnabled(CFStringRef domain,
                                      AuthorizationRef authorization,
                                      CFStringRef jobLabel,
                                      Boolean enabled,
+                                     CFErrorRef *error);
+
+static int cachedHostMajorVersion;
+static pthread_once_t hostVersionOnce = PTHREAD_ONCE_INIT;
+
+static void resolveHostMajorVersion(void) {
+    char productVersion[32] = {0};
+    size_t size = sizeof(productVersion);
+    if (sysctlbyname("kern.osproductversion", productVersion,
+                     &size, NULL, 0) == 0)
+        cachedHostMajorVersion = (int)strtol(productVersion, NULL, 10);
+}
+
+static int hostMajorVersion(void) {
+    pthread_once(&hostVersionOnce, resolveHostMajorVersion);
+    return cachedHostMajorVersion;
+}
+
+static Boolean compatSMJobSetEnabled(CFStringRef domain,
+                                     AuthorizationRef authorization,
+                                     CFStringRef jobLabel,
+                                     Boolean enabled,
                                      CFErrorRef *error) {
+    bool isMatchingBootpd = jobLabel &&
+        CFEqual(jobLabel, CFSTR("vzi.apple.bootpd"));
+    int majorVersion = hostMajorVersion();
+    // iPadOS 14 has no ServiceManagement implementation. Avoid repeating an
+    // impossible dlopen/dlsym and thousands of identical stderr lines, while
+    // retaining the established result for both the private bootpd job and
+    // every other caller.
+    if (majorVersion == 14) {
+        if (isMatchingBootpd) {
+            static unsigned int bootpdLogCount;
+            if (__sync_fetch_and_add(&bootpdLogCount, 1) < 4)
+                dprintf(STDERR_FILENO,
+                        "AuthorizationCompat: iPadOS 14 private bootpd "
+                        "requested=%d; package controller owns launchd\n",
+                        enabled);
+            return 1;
+        }
+        static unsigned int unavailableLogCount;
+        if (__sync_fetch_and_add(&unavailableLogCount, 1) < 4)
+            dprintf(STDERR_FILENO,
+                    "AuthorizationCompat: SMJobSetEnabled unavailable\n");
+        return 0;
+    }
+
+    // Preserve the proven iPadOS 15/16 lookup and retry behavior. In
+    // particular, do not permanently cache an early failed symbol lookup.
     static SMJobSetEnabledFn realFunction;
     static const CFStringRef *userDomain;
     if (!realFunction || !userDomain) {
@@ -232,7 +280,6 @@ static Boolean compatSMJobSetEnabled(CFStringRef domain,
             serviceManagement, "SMJobSetEnabled") : NULL;
         userDomain = serviceManagement ? (const CFStringRef *)dlsym(
             serviceManagement, "kSMDomainUserLaunchd") : NULL;
-        // An interposed dlsym result must never recurse back into this shim.
         if ((void *)realFunction == (void *)&compatSMJobSetEnabled)
             realFunction = (SMJobSetEnabledFn)dlsym(
                 RTLD_NEXT, "SMJobSetEnabled");
@@ -241,15 +288,7 @@ static Boolean compatSMJobSetEnabled(CFStringRef domain,
                 "function=%p user-domain=%p\n",
                 realFunction, userDomain);
     }
-    bool isMatchingBootpd = jobLabel &&
-        CFEqual(jobLabel, CFSTR("vzi.apple.bootpd"));
-    char productVersion[32] = {0};
-    size_t productVersionSize = sizeof(productVersion);
-    bool hasUserLaunchDomain =
-        sysctlbyname("kern.osproductversion", productVersion,
-                     &productVersionSize, NULL, 0) == 0 &&
-        strtol(productVersion, NULL, 10) >= 16;
-    if (isMatchingBootpd && hasUserLaunchDomain &&
+    if (isMatchingBootpd && majorVersion >= 16 &&
         userDomain && *userDomain) {
         domain = *userDomain;
         dprintf(STDERR_FILENO,
@@ -257,21 +296,10 @@ static Boolean compatSMJobSetEnabled(CFStringRef domain,
                 enabled);
     }
     if (!realFunction) {
-        // iPadOS 14 has no ServiceManagement implementation. Do not load the
-        // socket job during package installation: UDP/67 can receive a host
-        // packet before InternetSharing has written its configuration, which
-        // makes launchd retry bootpd indefinitely. Manage only our private job
-        // here, at the point Big Sur InternetSharing normally enables it.
-        if (isMatchingBootpd && productVersion[0] &&
-            strtol(productVersion, NULL, 10) == 14) {
+        static unsigned int unavailableLogCount;
+        if (__sync_fetch_and_add(&unavailableLogCount, 1) < 4)
             dprintf(STDERR_FILENO,
-                    "AuthorizationCompat: iPadOS 14 private bootpd "
-                    "requested=%d; package controller owns launchd\n",
-                    enabled);
-            return 1;
-        }
-        dprintf(STDERR_FILENO,
-                "AuthorizationCompat: SMJobSetEnabled unavailable\n");
+                    "AuthorizationCompat: SMJobSetEnabled unavailable\n");
         return 0;
     }
     return realFunction(domain, authorization, jobLabel, enabled, error);

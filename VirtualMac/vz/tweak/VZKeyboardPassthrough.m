@@ -1,10 +1,13 @@
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
 #include <dlfcn.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 static IMP gOriginalKeyCommands;
@@ -84,6 +87,19 @@ static void DebugLog(const char *message)
 {
     if (VZSettingEnabled(@"DebugLogging"))
         Log(message);
+}
+
+// Formatted variant for the view-tree probe, which has to print class names and
+// frames that cannot be built with a plain C string.
+static void LogFormat(NSString *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *line = [[NSString alloc] initWithFormat:format
+                                            arguments:arguments];
+    va_end(arguments);
+    Log(line.UTF8String);
+    [line release];
 }
 
 static BOOL VirtualMacIsFrontmost(id springBoard)
@@ -189,6 +205,187 @@ static BOOL VZFluidGestureShouldReceiveTouch(id self, SEL selector,
     return ((BOOL (*)(id, SEL, id, id))
         gOriginalFluidGestureShouldReceiveTouch)(
             self, selector, recognizer, touch);
+}
+
+// iPadOS reveals the Dock whenever a pointer rests on the bottom edge, and a
+// top multitasking affordance whenever the pointer reaches the top edge. Both
+// are pointer-driven system UI rather than gestures, so neither
+// preferredScreenEdgesDeferringSystemGestures nor SBSystemGestureManager
+// covers them. They have to be suppressed where SpringBoard presents them, and
+// only while Virtual Mac is the frontmost app.
+static IMP gOriginalDockSetHidden;
+static IMP gOriginalDockSetAlpha;
+static IMP gOriginalAffordanceSetHidden;
+static Class gAffordanceClass;
+
+static void VZDockSetHidden(id self, SEL selector, BOOL hidden)
+{
+    if (VZSettingEnabled(@"SystemGestureSuppression") &&
+        VZSharedApplicationIsTarget()) {
+        static unsigned long count;
+        if (count++ < 8)
+            Log("hid the iPadOS Dock for the frontmost Virtual Mac");
+        hidden = YES;
+    }
+    ((void (*)(id, SEL, BOOL))gOriginalDockSetHidden)(self, selector, hidden);
+}
+
+static void VZDockSetAlpha(id self, SEL selector, double alpha)
+{
+    if (VZSettingEnabled(@"SystemGestureSuppression") &&
+        VZSharedApplicationIsTarget())
+        alpha = 0.0;
+    ((void (*)(id, SEL, double))gOriginalDockSetAlpha)(self, selector, alpha);
+}
+
+static void VZAffordanceSetHidden(id self, SEL selector, BOOL hidden)
+{
+    if (VZSettingEnabled(@"MultitaskingGestureSuppression") &&
+        VZSharedApplicationIsTarget()) {
+        static unsigned long count;
+        if (count++ < 8)
+            Log("hid the iPadOS top multitasking affordance");
+        hidden = YES;
+    }
+    ((void (*)(id, SEL, BOOL))gOriginalAffordanceSetHidden)(
+        self, selector, hidden);
+}
+
+// One-shot diagnostic. The affordance and Dock classes are private and can
+// differ between iPadOS releases, so the tweak dumps the real view tree and the
+// matching class names once, guarded by a marker file that the replacement
+// installer removes.
+static const char *gSystemUIProbeMarker = "/tmp/vz-system-ui-probe.done";
+
+static void VZProbeViewTree(id view, int depth, CGRect screenBounds)
+{
+    if (!view || depth > 6)
+        return;
+    CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(
+        view, sel_registerName("frame"));
+    BOOL hidden = ((BOOL (*)(id, SEL))objc_msgSend)(
+        view, sel_registerName("isHidden"));
+    double alpha = ((double (*)(id, SEL))objc_msgSend)(
+        view, sel_registerName("alpha"));
+    BOOL nearTop = frame.origin.y < 100.0;
+    BOOL nearBottom =
+        CGRectGetMaxY(frame) > CGRectGetMaxY(screenBounds) - 140.0;
+    if (depth <= 3 || ((nearTop || nearBottom) && frame.size.width > 1.0)) {
+        NSMutableString *indent = [NSMutableString string];
+        for (int level = 1; level < depth; level++)
+            [indent appendString:@"  "];
+        LogFormat(@"[probe] %@%@ frame=%.0f,%.0f %.0fx%.0f hidden=%d "
+                  @"alpha=%.2f%@%@",
+                  indent, NSStringFromClass(object_getClass(view)),
+                  frame.origin.x, frame.origin.y, frame.size.width,
+                  frame.size.height, hidden, alpha,
+                  nearTop ? @" TOP" : @"",
+                  nearBottom ? @" BOTTOM" : @"");
+    }
+    NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(
+        view, sel_registerName("subviews"));
+    for (id child in subviews)
+        VZProbeViewTree(child, depth + 1, screenBounds);
+}
+
+static void VZProbeSystemUIClasses(void)
+{
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0)
+        return;
+    Class *classes = calloc((size_t)count, sizeof(Class));
+    if (!classes)
+        return;
+    objc_getClassList(classes, count);
+    for (int index = 0; index < count; index++) {
+        NSString *name = NSStringFromClass(classes[index]);
+        if (![name containsString:@"Dock"] &&
+            ![name containsString:@"Affordance"] &&
+            ![name containsString:@"Multitasking"] &&
+            ![name containsString:@"HomeBar"])
+            continue;
+        LogFormat(@"[probe] class %@", name);
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(classes[index], &methodCount);
+        for (unsigned int method = 0; method < methodCount; method++) {
+            NSString *selector = NSStringFromSelector(
+                method_getName(methods[method]));
+            if ([selector containsString:@"idden"] ||
+                [selector containsString:@"lpha"] ||
+                [selector containsString:@"isible"] ||
+                [selector containsString:@"hipTest"] ||
+                [selector containsString:@"ointInside"])
+                LogFormat(@"[probe]   %@", selector);
+        }
+        if (methods)
+            free(methods);
+    }
+    free(classes);
+}
+
+static void VZProbeSystemUI(void)
+{
+    LogFormat(@"[probe] ===== SpringBoard UI probe =====");
+    Class applicationClass = objc_getClass("UIApplication");
+    id application = applicationClass
+        ? ((id (*)(id, SEL))objc_msgSend)(
+              applicationClass, sel_registerName("sharedApplication"))
+        : nil;
+    NSArray *windows = application
+        ? ((id (*)(id, SEL))objc_msgSend)(
+              application, sel_registerName("windows"))
+        : nil;
+    CGRect screenBounds = CGRectMake(0, 0, 0, 0);
+    Class screenClass = objc_getClass("UIScreen");
+    if (screenClass) {
+        id screen = ((id (*)(id, SEL))objc_msgSend)(
+            screenClass, sel_registerName("mainScreen"));
+        if (screen)
+            screenBounds = ((CGRect (*)(id, SEL))objc_msgSend)(
+                screen, sel_registerName("bounds"));
+    }
+    for (id window in windows) {
+        CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(
+            window, sel_registerName("frame"));
+        double level = ((double (*)(id, SEL))objc_msgSend)(
+            window, sel_registerName("windowLevel"));
+        LogFormat(@"[probe] window %@ level=%.0f frame=%.0f,%.0f %.0fx%.0f",
+                  NSStringFromClass(object_getClass(window)), level,
+                  frame.origin.x, frame.origin.y, frame.size.width,
+                  frame.size.height);
+        VZProbeViewTree(window, 1, screenBounds);
+    }
+    VZProbeSystemUIClasses();
+}
+
+static void VZScheduleSystemUIProbe(void)
+{
+    if (access(gSystemUIProbeMarker, F_OK) == 0)
+        return;
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,
+        dispatch_time(DISPATCH_TIME_NOW, 4ull * NSEC_PER_SEC),
+        4ull * NSEC_PER_SEC, NSEC_PER_SEC / 2);
+    dispatch_source_set_event_handler(timer, ^{
+        static int attempts;
+        if (!VZSharedApplicationIsTarget()) {
+            if (++attempts < 40)
+                return;
+            Log("system UI probe gave up waiting for the VM to be frontmost");
+            dispatch_source_cancel(timer);
+            return;
+        }
+        Log("system UI probe: VM is frontmost, dumping SpringBoard views");
+        VZProbeSystemUI();
+        FILE *marker = fopen(gSystemUIProbeMarker, "w");
+        if (marker) {
+            fprintf(marker, "done\n");
+            fclose(marker);
+        }
+        dispatch_source_cancel(timer);
+    });
+    dispatch_resume(timer);
 }
 
 static id VZKeyCommands(id self, SEL selector)
@@ -536,6 +733,56 @@ static void VZInstallKeyboardPassthrough(void)
         gOriginalFluidGestureShouldReceiveTouch = method_setImplementation(
             fluidTouchMethod, (IMP)VZFluidGestureShouldReceiveTouch);
     Log("installed active-VM fluid multitasking-gesture suppression");
+
+    // Pointer rest on the bottom edge reveals SpringBoard's Dock, which pushes
+    // the guest display out of the way. Hide it while the VM owns the screen.
+    Class dockView = objc_getClass("SBDockView");
+    Method dockHideMethod = dockView
+        ? class_getInstanceMethod(dockView, sel_registerName("setHidden:"))
+        : NULL;
+    if (dockHideMethod)
+        gOriginalDockSetHidden = method_setImplementation(
+            dockHideMethod, (IMP)VZDockSetHidden);
+    Method dockAlphaMethod = dockView
+        ? class_getInstanceMethod(dockView, sel_registerName("setAlpha:"))
+        : NULL;
+    if (dockAlphaMethod)
+        gOriginalDockSetAlpha = method_setImplementation(
+            dockAlphaMethod, (IMP)VZDockSetAlpha);
+    if (dockHideMethod)
+        Log("installed iPadOS Dock hover suppression");
+    else
+        Log("SBDockView setHidden: unavailable");
+
+    // The top multitasking affordance ("three dots") is a different private
+    // class on different iPadOS builds; take the first one that exists.
+    const char *affordanceClasses[] = {
+        "SBTopAffordanceViewController",
+        "SBTopAffordanceView",
+        "SBMultitaskingAffordanceView",
+        "SBMedusaAffordanceView",
+        "SBContinuousExposeAffordanceView",
+    };
+    for (size_t index = 0;
+         index < sizeof(affordanceClasses) / sizeof(affordanceClasses[0]);
+         index++) {
+        Class candidate = objc_getClass(affordanceClasses[index]);
+        Method method = candidate
+            ? class_getInstanceMethod(candidate, sel_registerName("setHidden:"))
+            : NULL;
+        if (!method)
+            continue;
+        gOriginalAffordanceSetHidden = method_setImplementation(
+            method, (IMP)VZAffordanceSetHidden);
+        gAffordanceClass = candidate;
+        LogFormat(@"installed top affordance suppression on %s",
+                  affordanceClasses[index]);
+        break;
+    }
+    if (!gAffordanceClass)
+        Log("no top affordance class matched; see the probe output");
+
+    VZScheduleSystemUIProbe();
 
     // Swallow the globe key at the UIKit event layer to suppress the
     // input-method switcher popup that handleKeyHIDEvent: can't stop.

@@ -23,9 +23,6 @@ need_command tar
 need_file "$BIN"
 need_file "$HOOK"
 
-DISMISS_RESTART_ALERT="${VZ_IPAD_DISMISS_RESTART_ALERT:-0}"
-[[ "$DISMISS_RESTART_ALERT" == 0 || "$DISMISS_RESTART_ALERT" == 1 ]] ||
-    die "VZ_IPAD_DISMISS_RESTART_ALERT must be 0 or 1"
 
 tar -C "$VZ_BUILD_ROOT/ipad-app" -czf "$ARCHIVE" VirtualMac.app
 ensure_ipad_usb
@@ -58,12 +55,7 @@ touch /tmp/VirtualMac.log /tmp/vzxpchook.log /tmp/vmmhook.log \\
   /tmp/vmm.stderr.log /tmp/vmm_ep.txt /tmp/pvg-trace.log
 chown mobile:mobile /tmp/VirtualMac.log /tmp/vzxpchook.log /tmp/vmmhook.log \\
   /tmp/vmm.stderr.log /tmp/vmm_ep.txt /tmp/pvg-trace.log
-if test '$DISMISS_RESTART_ALERT' = 1; then
-  touch /tmp/vz-dismiss-restart-alert
-  chown mobile:mobile /tmp/vz-dismiss-restart-alert
-else
-  rm -f /tmp/vz-dismiss-restart-alert
-fi
+rm -f /tmp/vz-dismiss-restart-alert
 /var/jb/usr/bin/uiopen --bundleid '$BUNDLE_ID'
 "
 

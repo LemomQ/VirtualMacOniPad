@@ -1,0 +1,98 @@
+#!/bin/sh
+# 安装边缘系统 UI 抑制包：替换注入 SpringBoard 的 tweak 与应用二进制，
+# 注册新的 CDHash，删除探测标记，最后 respring SpringBoard。
+#
+# 在本目录（含 VZKeyboardPassthrough.dylib）中执行，需要 root：
+#
+#     sh install-on-ipad.sh
+#
+# 无根越狱（Dopamine）与有根越狱（Taurine）两种布局都会自动识别。
+
+set -eu
+
+MAIN_CDHASH="@MAIN_CDHASH@"
+HOOK_CDHASH="@HOOK_CDHASH@"
+TWEAK_CDHASH="@TWEAK_CDHASH@"
+PROBE_MARKER=/tmp/vz-system-ui-probe.done
+LOG=/tmp/vz-springboard-shortcuts.log
+
+directory="$(cd "$(dirname "$0")" && pwd)"
+test -f "$directory/VZKeyboardPassthrough.dylib"
+test -f "$directory/VirtualMac"
+test -f "$directory/VZHostCompat.dylib"
+
+if test -x /var/jb/usr/bin/jbctl; then
+    prefix=/var/jb
+    app=/var/jb/Applications/VirtualMac.app
+else
+    prefix=""
+    app=/Applications/VirtualMac.app
+fi
+test -d "$app" || { echo "未找到 Virtual Mac.app" >&2; exit 1; }
+
+# Taurine 会按 vnode 缓存代码签名状态：原地覆盖已执行过的 Mach-O 可能让旧校验
+# 继续附着在新文件上，从而报 EAUTH。因此每次替换都走新 inode。
+replace_file() {
+    cp "$1" "$2.virtualmac-new"
+    chmod 755 "$2.virtualmac-new"
+    chown 0:0 "$2.virtualmac-new" 2>/dev/null || true
+    mv -f "$2.virtualmac-new" "$2"
+}
+
+tweak_directories="$prefix/Library/MobileSubstrate/DynamicLibraries $prefix/usr/lib/TweakInject"
+backup="$app/EdgeSuppressionBackup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+cp -p "$app/VirtualMac" "$app/VZHostCompat.dylib" "$backup/"
+echo "已把原有应用二进制备份到 $backup"
+
+replace_file "$directory/VirtualMac" "$app/VirtualMac"
+replace_file "$directory/VZHostCompat.dylib" "$app/VZHostCompat.dylib"
+
+for directory_target in $tweak_directories; do
+    test -d "$directory_target" || continue
+    if test -f "$directory_target/VZKeyboardPassthrough.dylib"; then
+        cp -p "$directory_target/VZKeyboardPassthrough.dylib" \
+            "$directory_target/VZKeyboardPassthrough.dylib.bak" 2>/dev/null || true
+    fi
+    replace_file "$directory/VZKeyboardPassthrough.dylib" \
+        "$directory_target/VZKeyboardPassthrough.dylib"
+    echo "已更新 tweak：$directory_target/VZKeyboardPassthrough.dylib"
+done
+
+# 让 tweak 在下次进入虚拟机时重新打印一次 SpringBoard 视图树探测。
+rm -f "$PROBE_MARKER"
+rm -f "$LOG"
+
+if test -x /var/jb/usr/bin/jbctl; then
+    /var/jb/usr/bin/jbctl trustcache add "$MAIN_CDHASH"
+    /var/jb/usr/bin/jbctl trustcache add "$HOOK_CDHASH"
+    /var/jb/usr/bin/jbctl trustcache add "$TWEAK_CDHASH"
+    echo "已用 jbctl 注册三个 CDHash"
+elif test -x /taurine/jbexec; then
+    # Taurine 用 jailbreakd 预检特权平台二进制；诊断性 spawn 即使成功也可能
+    # 返回 EPERM，因此忽略退出码。
+    for target in "$app/VirtualMac" "$app/VZHostCompat.dylib" \
+                  "$prefix/Library/MobileSubstrate/DynamicLibraries/VZKeyboardPassthrough.dylib"; do
+        test -f "$target" || continue
+        PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+            "$target" >/dev/null || true
+    done
+    echo "已用 jbexec 预检"
+else
+    echo "警告：未找到 jbctl 或 jbexec，请手动注册以下 CDHash：" >&2
+    echo "  $MAIN_CDHASH" >&2
+    echo "  $HOOK_CDHASH" >&2
+    echo "  $TWEAK_CDHASH" >&2
+fi
+
+echo "正在 respring SpringBoard 以加载新 tweak ..."
+killall -9 SpringBoard 2>/dev/null || true
+sleep 2
+
+echo "安装完成。请："
+echo "  1. 从主屏幕启动 Virtual Mac 并进入虚拟机；"
+echo "  2. 到 设置 → Input 打开要抑制的开关："
+echo "     Suppress iPadOS System Edge Gestures（底部 Dock）"
+echo "     Suppress iPadOS Multitasking Gestures（顶部三个点）"
+echo "  3. 回传 /tmp/vz-springboard-shortcuts.log（诊断包里也会包含它）。"
+echo "回滚：把 $backup 里的两个文件拷回应用包，并恢复 tweak 的 .bak 文件后 respring。"

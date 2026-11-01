@@ -191,6 +191,22 @@ otool -D "$VIDEO_TOOLBOX15" | grep -Fq \
     die "iPadOS 15 VideoToolbox identity was unexpectedly changed"
 otool -D "$VIDEO_TOOLBOX14" | grep -Fq '@rpath/VirtualMacVideoToolbox' ||
     die "iPadOS 14 VideoToolbox is missing its private dyld identity"
+# The private identity alone is insufficient on iPadOS 14: dyld may still
+# satisfy a weak VMM import from its shared cache. Verify the host endpoint is
+# a required load command in 14.x and remains weak in the newer variants.
+video_toolbox_dependency='@loader_path/../../../Frameworks/VideoToolbox.framework/VideoToolbox'
+load_command_for_dependency() {
+    otool -l "$1" | awk -v dependency="$video_toolbox_dependency" '
+        /cmd LC_LOAD(_WEAK)?_DYLIB/ { command=$2 }
+        $1 == "name" && $2 == dependency { print command; exit }
+    '
+}
+[[ "$(load_command_for_dependency "$VMM_IPADOS14")" == "LC_LOAD_DYLIB" ]] ||
+    die "iPadOS 14 VMM does not strongly load its private VideoToolbox endpoint"
+for newer_vmm in "$VMM_IPADOS15" "$VMM_IPADOS16"; do
+    [[ "$(load_command_for_dependency "$newer_vmm")" == "LC_LOAD_WEAK_DYLIB" ]] ||
+        die "iPadOS 14 VideoToolbox load policy leaked into $newer_vmm"
+done
 # Our Hypervisor adaptation is runtime-selected from the common hook. Only the
 # iPadOS 14 vmnet checksum adapter remains a separately compiled hot path.
 HOOK="$FRAMEWORKS/LaunchServicesCompat.dylib"

@@ -8,7 +8,6 @@ source "$SCRIPT_DIR/lib/common.sh"
 ATTEMPTS="${1:-5}"
 START_WAIT="${VZ_IPAD_START_WAIT:-12}"
 INPUT_SELF_TEST="${VZ_IPAD_INPUT_SELF_TEST:-0}"
-DISMISS_RESTART_ALERT="${VZ_IPAD_DISMISS_RESTART_ALERT:-0}"
 BUNDLE="${VZ_IPAD_VM_BUNDLE:-/var/mobile/Media/VirtualMac/Sequoia.bundle}"
 
 [[ "$ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
@@ -17,8 +16,6 @@ BUNDLE="${VZ_IPAD_VM_BUNDLE:-/var/mobile/Media/VirtualMac/Sequoia.bundle}"
     die "VZ_IPAD_START_WAIT must be a positive integer"
 [[ "$INPUT_SELF_TEST" == "0" || "$INPUT_SELF_TEST" == "1" ]] ||
     die "VZ_IPAD_INPUT_SELF_TEST must be 0 or 1"
-[[ "$DISMISS_RESTART_ALERT" == "0" || "$DISMISS_RESTART_ALERT" == "1" ]] ||
-    die "VZ_IPAD_DISMISS_RESTART_ALERT must be 0 or 1"
 
 ipad_ssh "
 find /tmp -maxdepth 1 -name 'vz-launch-attempt-*' -exec rm -f {} +
@@ -51,12 +48,7 @@ if test '$INPUT_SELF_TEST' = 1; then
 else
   rm -f /tmp/vz-input-self-test
 fi
-if test '$DISMISS_RESTART_ALERT' = 1; then
-  touch /tmp/vz-dismiss-restart-alert
-  chown mobile:mobile /tmp/vz-dismiss-restart-alert
-else
-  rm -f /tmp/vz-dismiss-restart-alert
-fi
+rm -f /tmp/vz-dismiss-restart-alert
 \"\$uiopen\" --bundleid com.mac.virtual
 "
     sleep "$START_WAIT"

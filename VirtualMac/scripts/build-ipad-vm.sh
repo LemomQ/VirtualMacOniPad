@@ -44,6 +44,7 @@ ENTITLEMENT_AUDIT="$VZ_REPO_ROOT/scripts/audit-entitlements.py"
 IPADOS15_OBJC_PATCH="$VZ_REPO_ROOT/vz/patches/patch_ipados15_objc_class_data.py"
 IPADOS15_OBJC_IMPORT_PATCH="$VZ_REPO_ROOT/vz/patches/patch_ipados15_objc_imports.py"
 IPADOS14_VMM_VMNET_PATCH="$VZ_REPO_ROOT/vz/patches/patch_ipados14_vmm_vmnet_import.py"
+IPADOS14_VMM_VIDEOTOOLBOX_PATCH="$VZ_REPO_ROOT/vz/patches/patch_ipados14_vmm_videotoolbox_import.py"
 VMM_IPADOS14_ENTS="$OUT/vmm-ipados14.ents.xml"
 
 need_command codesign
@@ -65,6 +66,7 @@ need_file "$ENTITLEMENT_AUDIT"
 need_file "$IPADOS15_OBJC_PATCH"
 need_file "$IPADOS15_OBJC_IMPORT_PATCH"
 need_file "$IPADOS14_VMM_VMNET_PATCH"
+need_file "$IPADOS14_VMM_VIDEOTOOLBOX_PATCH"
 need_file "$VZ_REPO_ROOT/vz/host/pvg_trace.m"
 need_file "$VZ_REPO_ROOT/vz/shaders/pvg_display.metal"
 
@@ -433,6 +435,11 @@ install_name_tool \
     "$VMM_IPADOS14"
 "$VZ_BUILD_ROOT/toolchain/venv/bin/python3" \
     "$IPADOS14_VMM_VMNET_PATCH" "$VMM_IPADOS14"
+# Old dyld otherwise coalesces this weak import with iPadOS 14's system
+# VideoToolbox, whose API does not include the Mac paravirtual host endpoint.
+# Keep the private extracted framework mandatory only in the 14.x VMM.
+"$VZ_BUILD_ROOT/toolchain/venv/bin/python3" \
+    "$IPADOS14_VMM_VIDEOTOOLBOX_PATCH" "$VMM_IPADOS14"
 "$VZ_BUILD_ROOT/toolchain/venv/bin/python3" \
     "$VZ_REPO_ROOT/vz/patches/patch_vmm_optional_pvg_reset.py" \
     "$VMM_IPADOS14"

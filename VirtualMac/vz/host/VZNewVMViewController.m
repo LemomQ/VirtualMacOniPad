@@ -38,6 +38,7 @@ static UIImage *VZCatalogIcon(NSDictionary *image)
 @property(nonatomic, assign) BOOL showDeveloperBetas;
 @property(nonatomic, assign) BOOL showVersionDetails;
 @property(nonatomic, assign) BOOL versionDetailsBeforeDeveloperBetas;
+@property(nonatomic, assign) CGFloat lastLayoutWidth;
 @end
 
 @implementation VZNewVMViewController
@@ -78,6 +79,17 @@ static UIImage *VZCatalogIcon(NSDictionary *image)
 {
     (void)sender;
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)viewDidLayoutSubviews
+{
+    [super viewDidLayoutSubviews];
+    CGFloat width = CGRectGetWidth(self.tableView.bounds);
+    BOOL changed = self.lastLayoutWidth > 0 &&
+        fabs(width - self.lastLayoutWidth) > 0.5;
+    self.lastLayoutWidth = width;
+    if (changed)
+        [self.tableView reloadData];
 }
 
 - (UIMenu *)filterMenu
@@ -252,6 +264,56 @@ static UIImage *VZCatalogIcon(NSDictionary *image)
     cell.accessoryView = accessory;
 }
 
+- (NSDictionary *)imageAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (indexPath.section == 0)
+        return self.recommendedImage;
+    if (indexPath.section == 1 && indexPath.row < self.versionImages.count)
+        return self.versionImages[indexPath.row];
+    return nil;
+}
+
+- (BOOL)title:(NSString *)title fitsCell:(UITableViewCell *)cell
+{
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+    CGFloat available = CGRectGetWidth(cell.textLabel.bounds);
+    if (available <= 0)
+        available = MAX(CGRectGetWidth(self.tableView.bounds) - 200.0, 80.0);
+    CGFloat needed = [title sizeWithAttributes:
+        @{NSFontAttributeName: cell.textLabel.font}].width;
+    return needed <= available;
+}
+
+- (void)fitTitleForImage:(NSDictionary *)image
+                    cell:(UITableViewCell *)cell
+{
+    BOOL compactName = !self.showMinorReleases &&
+        !self.showDeveloperBetas && !self.showVersionDetails;
+    NSString *displayName = [VZRestoreCatalog displayNameForImage:image
+                                                           compact:compactName];
+    NSString *title = compactName
+        ? [NSString stringWithFormat:VZL(@"Install %@"), displayName]
+        : displayName;
+    cell.textLabel.text = title;
+    [self setAccessoryForImage:image cell:cell];
+    if (![self title:title fitsCell:cell] && compactName) {
+        NSString *marketing = [VZRestoreCatalog marketingNameForImage:image];
+        if (marketing.length) {
+            displayName = [NSString stringWithFormat:@"macOS %@", marketing];
+            title = [NSString stringWithFormat:VZL(@"Install %@"), displayName];
+            cell.textLabel.text = title;
+        }
+    }
+    // The warning is supplementary: preserve the complete actionable title
+    // on narrow windows and retain the normal disclosure chevron.
+    if ([VZRestoreCatalog isExperimentalImage:image] &&
+        ![self title:title fitsCell:cell]) {
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView
          cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
@@ -269,23 +331,15 @@ static UIImage *VZCatalogIcon(NSDictionary *image)
     if (indexPath.section == 2) {
         cell.textLabel.text = VZL(@"Choose Custom IPSW");
         cell.detailTextLabel.text = self.showVersionDetails
-            ? VZL(@"Use an IPSW on your iPad") : nil;
+            ? VZDeviceString(VZL(@"Use an IPSW on your iPad"),
+                             VZL(@"Use an IPSW on your iPhone")) : nil;
         cell.imageView.layer.cornerRadius = 9.0;
         cell.imageView.contentMode = UIViewContentModeScaleAspectFill;
         cell.imageView.tintColor = nil;
         cell.imageView.image = VZCatalogIcon(@{});
         return cell;
     }
-    NSDictionary *image = indexPath.section == 0
-        ? self.recommendedImage
-        : self.versionImages[indexPath.row];
-    BOOL compactName = !self.showMinorReleases &&
-        !self.showDeveloperBetas && !self.showVersionDetails;
-    NSString *displayName = [VZRestoreCatalog displayNameForImage:image
-                                                           compact:compactName];
-    cell.textLabel.text = compactName
-        ? [NSString stringWithFormat:VZL(@"Install %@"), displayName]
-        : displayName;
+    NSDictionary *image = [self imageAtIndexPath:indexPath];
     cell.imageView.image = VZCatalogIcon(image);
     NSMutableArray *details = [NSMutableArray array];
     if (self.showVersionDetails) {
@@ -307,8 +361,18 @@ static UIImage *VZCatalogIcon(NSDictionary *image)
     }
     cell.detailTextLabel.text = self.showVersionDetails
         ? [details componentsJoinedByString:@" · "] : nil;
-    [self setAccessoryForImage:image cell:cell];
+    [self fitTitleForImage:image cell:cell];
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView
+   willDisplayCell:(UITableViewCell *)cell
+ forRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    (void)tableView;
+    NSDictionary *image = [self imageAtIndexPath:indexPath];
+    if (image)
+        [self fitTitleForImage:image cell:cell];
 }
 
 - (void)tableView:(UITableView *)tableView

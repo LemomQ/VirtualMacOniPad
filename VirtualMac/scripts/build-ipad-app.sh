@@ -35,6 +35,7 @@ need_file "$VZ_REPO_ROOT/scripts/validate-localizations.py"
 need_file "$VZ_REPO_ROOT/vz/host/VZNewVMViewController.m"
 need_file "$VZ_REPO_ROOT/vz/host/VZProgressViewController.m"
 need_file "$VZ_REPO_ROOT/vz/host/VZSettingsViewController.m"
+need_file "$VZ_REPO_ROOT/vz/host/VZTrackpadScrollBridge.m"
 need_file "$VZ_REPO_ROOT/vz/host/VZGuestTools.m"
 need_file "$VZ_REPO_ROOT/vz/host/VZGuestRuntimePolicy.m"
 need_file "$VZ_REPO_ROOT/vz/host/VZVMLibraryViewController.m"
@@ -58,7 +59,7 @@ cp "$VZ_BUILD_ROOT/guest-tools/VirtualMacGuestTools.tar.gz" \
     "$APP/GuestTools/VirtualMacGuestTools.tar.gz"
 sips -Z 320 "$VZ_REPO_ROOT/assets/VirtualMacTemplate.png" \
     --out "$APP/VirtualMacTemplate.png" >/dev/null
-APP_VERSION="${VZ_RELEASE_VERSION:-1.2}"
+APP_VERSION="${VZ_RELEASE_VERSION:-1.2.3}"
 APP_BUILD="$(git -C "$VZ_REPO_ROOT" rev-list --count HEAD)"
 plutil -replace CFBundleShortVersionString -string "$APP_VERSION" \
     "$APP/Info.plist"
@@ -119,6 +120,7 @@ xcrun --sdk iphoneos clang \
     "$VZ_REPO_ROOT/vz/host/VZNewVMViewController.m" \
     "$VZ_REPO_ROOT/vz/host/VZProgressViewController.m" \
     "$VZ_REPO_ROOT/vz/host/VZSettingsViewController.m" \
+    "$VZ_REPO_ROOT/vz/host/VZTrackpadScrollBridge.m" \
     "$VZ_REPO_ROOT/vz/host/VZVMLibraryViewController.m" \
     "$VZ_REPO_ROOT/vz/host/VirtualMacApp.m" \
     -o "$BIN"

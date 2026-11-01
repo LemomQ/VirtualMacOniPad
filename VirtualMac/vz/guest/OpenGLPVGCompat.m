@@ -31,6 +31,28 @@ static BOOL DebugEnabled(void) {
     return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
 }
 
+static BOOL ProcessUsesUnsupportedOpenGLPath(void) {
+    static BOOL excluded;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Resolve the executable names from the corresponding app bundles,
+        // rather than relying on where users install the apps. Firefox does
+        // its relevant compositing in its GPU helper and plugin-container,
+        // not the main executable. Keep global environment injection, but
+        // leave only these exact helper/Sublime executables on macOS's stock
+        // renderer.
+        NSString *executable = NSProcessInfo.processInfo.processName;
+        excluded = [executable isEqualToString:@"firefox"] ||
+            [executable isEqualToString:@"Firefox GPU Helper"] ||
+            [executable isEqualToString:
+                @"Firefox Developer Edition GPU Helper"] ||
+            [executable isEqualToString:@"plugin-container"] ||
+            [executable isEqualToString:@"sublime_merge"] ||
+            [executable isEqualToString:@"sublime_text"];
+    });
+    return excluded;
+}
+
 static BOOL ProcessIsTranslated(void) {
     static BOOL translated;
     static dispatch_once_t once;
@@ -344,7 +366,7 @@ static CFTypeRef PVGSearchRegistryProperty(
 static CFTypeRef PVGCreateRegistryProperty(
     io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator,
     IOOptionBits options) {
-    if (IsParavirtualGPU(entry) &&
+    if (!ProcessUsesUnsupportedOpenGLPath() && IsParavirtualGPU(entry) &&
         CFEqual(key, CFSTR("IOGLBundleName"))) {
         for (id<MTLDevice> device in MTLCopyAllDevices())
             EnablePVGOpenGL(device);

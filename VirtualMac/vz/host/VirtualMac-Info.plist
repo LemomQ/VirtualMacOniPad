@@ -51,7 +51,7 @@
     </dict>
   </array>
   <key>CFBundleShortVersionString</key>
-  <string>1.2</string>
+  <string>1.2.3</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSRequiresIPhoneOS</key>
@@ -64,6 +64,18 @@
 	<string>16.0</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Pass microphone audio through to the macOS virtual machine.</string>
+  <!-- Keep the VM alive while the screen is locked. The app already holds an
+       active PlayAndRecord audio session for microphone passthrough, but an
+       active session alone does not buy background runtime: without this key
+       iPadOS suspends the app as soon as it is backgrounded, and a suspended
+       app gets reclaimed under memory pressure. The VM is by far the largest
+       memory consumer on the device, so it is the first thing jetsam takes,
+       which is what ends a VM left running overnight with the screen off.
+       Declaring the audio background mode is what makes that session count. -->
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>audio</string>
+  </array>
   <key>UIDeviceFamily</key>
   <array>
     <integer>1</integer>
@@ -72,6 +84,12 @@
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UIFileSharingEnabled</key>
+  <true/>
+  <!-- Opt out of iPad multitasking. On iPadOS 18 and earlier this keeps the
+       scene full screen, prevents Split View and Slide Over entirely, and the
+       system therefore does not show the top multitasking ("three dots")
+       affordance that a multitasking-capable app gets. -->
+  <key>UIRequiresFullScreen</key>
   <true/>
   <key>UISupportedInterfaceOrientations~ipad</key>
   <array>

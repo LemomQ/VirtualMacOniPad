@@ -148,7 +148,9 @@ static NSAttributedString *VZTitleWithBadge(NSString *title,
     [steps addObject:@{
         @"kind": @"agent",
         @"title": VZL(@"Fix with Coding Agent"),
-        @"detail": VZL(@"Install OpenSSH and LLDB from Sileo, connect your iPad to a computer, and ask Codex or Claude Code to diagnose and fix the issue. Share the solution on Github."),
+        @"detail": VZDeviceString(
+            VZL(@"Install OpenSSH and LLDB from Sileo, connect your iPad to a computer, and ask Codex or Claude Code to diagnose and fix the issue. Share the solution on Github."),
+            VZL(@"Install OpenSSH and LLDB from Sileo, connect your iPhone to a computer, and ask Codex or Claude Code to diagnose and fix the issue. Share the solution on Github.")),
     }];
     if (self.options & VZFailureSupportOptionDiagnosticsUnavailable) {
         NSUInteger diagnosticsIndex = 0;

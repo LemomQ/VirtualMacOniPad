@@ -101,9 +101,11 @@ static NSString *VZDisplaySelectionTitle(NSDictionary *options)
         [selection isEqualToString:@"FullScreen"])
         return VZL(@"Full Screen");
     if ([selection isEqualToString:@"LandscapeNativeRetina"])
-        return VZL(@"Landscape iPad");
+        return VZDeviceString(VZL(@"Landscape iPad"),
+                              VZL(@"Landscape iPhone"));
     if ([selection isEqualToString:@"PortraitNativeRetina"])
-        return VZL(@"Portrait iPad");
+        return VZDeviceString(VZL(@"Portrait iPad"),
+                              VZL(@"Portrait iPhone"));
     if ([selection isEqualToString:@"ExternalDisplay"])
         return VZL(@"External Display");
     if ([selection isEqualToString:@"WindowSizeAtStartup"])
@@ -159,7 +161,17 @@ static uint64_t VZDefaultStorageSize(void)
     NSDictionary *attributes = [NSFileManager.defaultManager
         attributesOfFileSystemForPath:VZVMLibraryPath() error:nil];
     uint64_t total = [attributes[NSFileSystemSize] unsignedLongLongValue];
-    return total && total <= GiB(64) ? GiB(32) : GiB(64);
+    uint64_t available =
+        [attributes[NSFileSystemFreeSize] unsignedLongLongValue];
+
+    // Disk.img is sparse, so its logical capacity is not allocated up front.
+    // Still require enough real headroom for an IPSW, restore working files,
+    // and meaningful guest growth before offering a larger default.
+    if (total >= GiB(512) && available >= GiB(160))
+        return GiB(256);
+    if (total >= GiB(256) && available >= GiB(96))
+        return GiB(128);
+    return GiB(64);
 }
 
 static uint64_t VZAvailableStorageSize(void)
@@ -304,7 +316,8 @@ static NSString *VZActiveInternetDisplayName(void)
     if ([candidate hasPrefix:@"utun"])
         return VZL(@"VPN");
     return candidate ? VZInterfaceDisplayName(candidate)
-                     : VZL(@"iPad Internet Connection");
+                     : VZDeviceString(VZL(@"iPad Internet Connection"),
+                                      VZL(@"iPhone Internet Connection"));
 }
 
 BOOL VZRestoreImageUsesMontereyProfile(NSString *path)
@@ -605,6 +618,7 @@ void VZRemovePaths(NSArray<NSString *> *paths)
 @property(nonatomic, copy) NSString *experimentalMacOSName;
 @property(nonatomic, copy) void (^chooseDifferentVersionHandler)(void);
 @property(nonatomic, retain) UIView *experimentalWarningHeader;
+@property(nonatomic, assign) CGFloat lastConfigurationWidth;
 @end
 
 @implementation VZVMConfigurationViewController
@@ -733,6 +747,12 @@ void VZRemovePaths(NSArray<NSString *> *paths)
 - (void)viewDidLayoutSubviews
 {
     [super viewDidLayoutSubviews];
+    CGFloat tableWidth = CGRectGetWidth(self.tableView.bounds);
+    BOOL widthChanged = self.lastConfigurationWidth > 0 &&
+        fabs(tableWidth - self.lastConfigurationWidth) > 0.5;
+    self.lastConfigurationWidth = tableWidth;
+    if (widthChanged)
+        [self.tableView reloadData];
     UIView *header = self.experimentalWarningHeader;
     if (!header)
         return;
@@ -842,6 +862,15 @@ void VZRemovePaths(NSArray<NSString *> *paths)
              VZL(@"Audio and Acceleration")][section];
 }
 
+- (NSString *)tableView:(UITableView *)tableView
+ titleForFooterInSection:(NSInteger)section
+{
+    (void)tableView;
+    if (section == 0 && !self.bundlePath)
+        return VZL(@"Storage size can’t be changed later. If you need additional storage in the future, set a larger size now.");
+    return nil;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView
          cellForRowAtIndexPath:(NSIndexPath *)indexPath
 {
@@ -889,7 +918,18 @@ void VZRemovePaths(NSArray<NSString *> *paths)
         } else {
             NSDictionary *share = self.options[VZSharedDirectoriesKey]
                 [indexPath.row - 1];
-            cell.textLabel.text = [share[@"Path"] lastPathComponent];
+            NSString *path = share[@"Path"];
+            NSString *name = path.lastPathComponent;
+            NSArray<NSString *> *components = path.pathComponents;
+            if (components.count >= 2 &&
+                [components.lastObject isEqualToString:@"Downloads"] &&
+                [components[components.count - 2]
+                    isEqualToString:@"File Provider Storage"])
+                name = VZL(@"Downloads");
+            else if ([name isEqualToString:@"File Provider Storage"])
+                name = VZDeviceString(VZL(@"On My iPad"),
+                                      VZL(@"On My iPhone"));
+            cell.textLabel.text = name;
             cell.detailTextLabel.text = [share[@"ReadOnly"] boolValue]
                 ? VZL(@"Read Only") : VZL(@"Read & Write");
         }
@@ -940,7 +980,13 @@ void VZRemovePaths(NSArray<NSString *> *paths)
             [self.options[VZPointingDeviceKey] isEqualToString:@"USBMouse"]
             ? VZL(@"USB Mouse") : VZL(@"Mac Trackpad");
     } else if (indexPath.section == 3) {
-        cell.textLabel.text = VZL(@"Apple Pencil Pressure and Tilt");
+        NSString *fullTitle = VZL(@"Apple Pencil Pressure and Tilt");
+        CGFloat available = MAX(CGRectGetWidth(tableView.bounds) - 147.0,
+                                80.0);
+        CGFloat needed = [fullTitle sizeWithAttributes:@{
+            NSFontAttributeName: cell.textLabel.font}].width;
+        cell.textLabel.text = needed <= available
+            ? fullTitle : VZL(@"Apple Pencil Pressure");
         UISwitch *toggle = [[[UISwitch alloc] init] autorelease];
         toggle.on = [self.options[VZApplePencilPressureTiltEnabledKey]
             boolValue];
@@ -1026,9 +1072,11 @@ void VZRemovePaths(NSArray<NSString *> *paths)
         @{@"title": VZL(@"Full Screen"), @"mode": @"FullScreen"},
         @{@"title": VZL(@"Window Size"),
           @"mode": @"WindowSizeAtStartup"},
-        @{@"title": VZL(@"Landscape iPad"),
+        @{@"title": VZDeviceString(VZL(@"Landscape iPad"),
+                                    VZL(@"Landscape iPhone")),
           @"mode": @"LandscapeNativeRetina"},
-        @{@"title": VZL(@"Portrait iPad"),
+        @{@"title": VZDeviceString(VZL(@"Portrait iPad"),
+                                    VZL(@"Portrait iPhone")),
           @"mode": @"PortraitNativeRetina"},
         @{@"title": VZL(@"External Display"),
           @"mode": @"ExternalDisplay"},
@@ -1102,13 +1150,28 @@ void VZRemovePaths(NSArray<NSString *> *paths)
                       min:(uint64_t)minimum max:(uint64_t)maximum
                     bytes:(BOOL)bytes
 {
-    NSString *range = maximum
-        ? [NSString stringWithFormat:VZL(@"Allowed: %llu–%llu%@"),
-            bytes ? minimum >> 30 : minimum,
-            bytes ? maximum >> 30 : maximum, bytes ? @" GB" : @""]
-        : [NSString stringWithFormat:
-            VZL(@"Minimum: %llu GB. The upper limit is determined by the filesystem."),
-            minimum >> 30];
+    NSString *range;
+    if ([key isEqualToString:VZCPUCountKey]) {
+        NSUInteger recommendation = MIN((uint64_t)4, maximum);
+        range = [NSString stringWithFormat:VZDeviceString(
+            VZL(@"You can assign between %llu and %llu processor cores to this Virtual Mac, with %lu processor cores as the recommendation.\n\nMaxing out processor core assignment does not guarantee improved performance in Virtual Mac, as iPadOS also needs processor power to coordinate underlying tasks."),
+            VZL(@"You can assign between %llu and %llu processor cores to this Virtual Mac, with %lu processor cores as the recommendation.\n\nMaxing out processor core assignment does not guarantee improved performance in Virtual Mac, as iOS also needs processor power to coordinate underlying tasks.")),
+            minimum, maximum, (unsigned long)recommendation];
+    } else if ([key isEqualToString:VZMemorySizeKey]) {
+        uint64_t recommendation = MIN(VZDefaultMemorySize(), maximum) >> 30;
+        range = [NSString stringWithFormat:VZDeviceString(
+            VZL(@"You can assign between %llu and %llu GB of memory to this Virtual Mac, with %llu GB as the recommendation. The remaining memory is used for graphics processing and iPadOS.\n\nMaxing out memory assignment does not guarantee improved performance in Virtual Mac, and may degrade graphics performance and system stability."),
+            VZL(@"You can assign between %llu and %llu GB of memory to this Virtual Mac, with %llu GB as the recommendation. The remaining memory is used for graphics processing and iOS.\n\nMaxing out memory assignment does not guarantee improved performance in Virtual Mac, and may degrade graphics performance and system stability.")),
+            minimum >> 30, maximum >> 30, recommendation];
+    } else {
+        range = maximum
+            ? [NSString stringWithFormat:VZL(@"Allowed: %llu–%llu%@"),
+                bytes ? minimum >> 30 : minimum,
+                bytes ? maximum >> 30 : maximum, bytes ? @" GB" : @""]
+            : [NSString stringWithFormat:
+                VZL(@"Minimum: %llu GB. The upper limit is determined by the filesystem."),
+                minimum >> 30];
+    }
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:title
                          message:range
@@ -1629,6 +1692,8 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
 - (void)layoutSubviews
 {
     [super layoutSubviews];
+    self.searchBar.placeholder = CGRectGetWidth(self.bounds) < 500
+        ? VZL(@"Search") : VZL(@"Search Virtual Mac");
     UITextField *field = self.searchBar.searchTextField;
     CGRect fieldFrame = [field convertRect:field.bounds toView:self];
     if (fieldFrame.size.width > 0) {
@@ -1793,7 +1858,9 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
     title.textAlignment = NSTextAlignmentCenter;
     title.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *message = [[[UILabel alloc] init] autorelease];
-    message.text = VZL(@"People have dreamed of running macOS on iPad for more than a decade. Today, that dream comes true. Create a Virtual Mac to get started.");
+    message.text = VZDeviceString(
+        VZL(@"People have dreamed of running macOS on iPad for more than a decade. Today, that dream comes true. Create a Virtual Mac to get started."),
+        VZL(@"People have dreamed of taking macOS wherever they go for more than a decade. Today, that dream comes true. Create a Virtual Mac to get started."));
     message.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     message.textColor = UIColor.secondaryLabelColor;
     message.textAlignment = NSTextAlignmentCenter;
@@ -2312,6 +2379,7 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
     cell.contentView.layer.borderColor = UIColor.separatorColor.CGColor;
     cell.contentView.clipsToBounds = YES;
     BOOL list = [[VZAppSettings.sharedSettings stringForKey:VZLibraryLayoutKey] isEqualToString:@"list"];
+    BOOL narrow = CGRectGetWidth(collectionView.bounds) < 500;
     UIView *selected = [[[UIView alloc] initWithFrame:cell.bounds] autorelease];
     selected.backgroundColor = UIColor.tertiarySystemFillColor;
     selected.layer.cornerRadius = 14;
@@ -2383,13 +2451,15 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
         image.accessibilityTraits = UIAccessibilityTraitButton;
         [more setImage:[UIImage systemImageNamed:@"ellipsis.circle"] forState:UIControlStateNormal];
         more.accessibilityLabel = [NSString stringWithFormat:VZL(@"Configure %@"), machine[@"name"]];
+        more.hidden = narrow;
         {
             UIVisualEffectView *playBackground = [[[UIVisualEffectView alloc]
                 initWithEffect:[UIBlurEffect effectWithStyle:
                     UIBlurEffectStyleSystemUltraThinMaterialDark]] autorelease];
             playBackground.translatesAutoresizingMaskIntoConstraints = NO;
             playBackground.userInteractionEnabled = YES;
-            CGFloat playDiameter = list ? 36 : 72;
+            CGFloat playDiameter = list ? (narrow ? 32 : 36)
+                                        : (narrow ? 52 : 72);
             playBackground.layer.cornerRadius = playDiameter / 2.0;
             playBackground.clipsToBounds = YES;
             UIButton *play = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -2430,10 +2500,14 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
             [image.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
             [image.widthAnchor constraintEqualToConstant:104], [image.heightAnchor constraintEqualToConstant:62],
             [title.leadingAnchor constraintEqualToAnchor:image.trailingAnchor constant:14],
-            [title.trailingAnchor constraintLessThanOrEqualToAnchor:more.leadingAnchor constant:-8],
+            [title.trailingAnchor constraintLessThanOrEqualToAnchor:
+                (narrow ? cell.contentView.trailingAnchor : more.leadingAnchor)
+                constant:(narrow ? -12 : -8)],
             [title.bottomAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor constant:-2],
             [detail.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
-            [detail.trailingAnchor constraintLessThanOrEqualToAnchor:more.leadingAnchor constant:-8],
+            [detail.trailingAnchor constraintLessThanOrEqualToAnchor:
+                (narrow ? cell.contentView.trailingAnchor : more.leadingAnchor)
+                constant:(narrow ? -12 : -8)],
             [detail.topAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor constant:3],
             [more.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
             [more.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
@@ -2447,7 +2521,9 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
             [image.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor],
             [image.heightAnchor constraintEqualToAnchor:cell.contentView.widthAnchor multiplier:0.56],
             [title.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:14],
-            [title.trailingAnchor constraintLessThanOrEqualToAnchor:more.leadingAnchor constant:-6],
+            [title.trailingAnchor constraintLessThanOrEqualToAnchor:
+                (narrow ? cell.contentView.trailingAnchor : more.leadingAnchor)
+                constant:(narrow ? -14 : -6)],
             [title.topAnchor constraintEqualToAnchor:image.bottomAnchor constant:12],
             [detail.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
             [detail.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-14],
@@ -2469,7 +2545,7 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
     CGFloat width = collectionView.bounds.size.width - 48;
     if ([[VZAppSettings.sharedSettings stringForKey:VZLibraryLayoutKey] isEqualToString:@"list"])
         return CGSizeMake(width, 82);
-    NSUInteger columns = width >= 900 ? 3 : 2;
+    NSUInteger columns = width >= 900 ? 3 : (width >= 520 ? 2 : 1);
     CGFloat itemWidth = floor((width - 18 * (columns - 1)) / columns);
     return CGSizeMake(itemWidth, itemWidth * 0.56 + 76);
 }
@@ -2659,7 +2735,9 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
         initWithTitle:VZL(@"Copying Restore Image")] autorelease];
     self.restoreCopyController.statusText = source.lastPathComponent;
     self.restoreCopyController.detailText =
-        VZL(@"Preparing the IPSW for installation. Your iPad will remain awake.");
+        VZDeviceString(
+            VZL(@"Preparing the IPSW for installation. Your iPad will remain awake."),
+            VZL(@"Preparing the IPSW for installation. Your iPhone will remain awake."));
     self.restoreCopyController.consoleHidden = YES;
     self.restoreCopyController.indeterminate = YES;
     UINavigationController *navigation = [[[UINavigationController alloc]
@@ -2851,7 +2929,9 @@ static const CGFloat VZLibraryHorizontalInset = 24.0;
         [initialFormatter stringFromByteCount:0],
         expected > 0 ? [initialFormatter stringFromByteCount:expected] : @"—"];
     self.downloadController.tipText =
-        VZL(@"Keep Virtual Mac open. Your iPad will remain awake until the download finishes.");
+        VZDeviceString(
+            VZL(@"Keep Virtual Mac open. Your iPad will remain awake until the download finishes."),
+            VZL(@"Keep Virtual Mac open. Your iPhone will remain awake until the download finishes."));
     self.downloadController.consoleHidden = YES;
     self.downloadController.indeterminate = expected == 0;
     self.downloadController.cancellationHandler = ^{

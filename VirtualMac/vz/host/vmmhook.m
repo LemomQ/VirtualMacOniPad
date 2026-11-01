@@ -384,6 +384,7 @@ static BOOL host_is_ipados14(void) {
 }
 
 static uint64_t xpc_trace_count;
+static uint64_t xpc_scroll_trace_count;
 static uint64_t xpc_digitizer_received;
 static uint64_t xpc_digitizer_processed;
 static uint64_t xpc_keyboard_received;
@@ -977,11 +978,13 @@ static bool environment_flag_enabled(const char *name) {
     return value && value[0] && strcmp(value, "0") != 0;
 }
 
-// In normal operation counters saturate after the small diagnostic envelope,
-// leaving only one relaxed load and a predictable branch in the hot path.
-// Debug Logging keeps full counters for periodic health reports.
+// Counters saturate after their diagnostic envelope in every mode, leaving
+// only one relaxed load and a predictable branch in the hot path. In
+// particular, Debug Logging must not add an atomic increment and exit-reason
+// accounting to every hv_vcpu_run for the lifetime of the VM. Explicit deep
+// VCPU tracing remains available through VMMHOOK_TRACE_VCPU.
 static uint64_t diagnostic_sequence(uint64_t *counter, uint64_t limit) {
-    if (runtime_debug_logging)
+    if (runtime_trace_all_vcpu)
         return __atomic_add_fetch(counter, 1, __ATOMIC_RELAXED);
     uint64_t current = __atomic_load_n(counter, __ATOMIC_RELAXED);
     while (current < limit) {
@@ -1086,6 +1089,24 @@ static void trace_xpc_message(const char *operation, xo_t connection,
     const char *name = xpc_message_name(message);
     if (name && strcmp(name, "guest_did_post_trace_event") == 0)
         return;
+    // Scroll debugging needs the exact message after Virtualization has
+    // serialized _VZScrollWheelEvent and before the VMM decodes it. The
+    // general XPC trace limit is normally consumed during VM startup, so keep
+    // a separate bounded envelope for this high-frequency message. This path
+    // is completely absent unless the user enabled Debug Logging.
+    if (runtime_debug_logging && name &&
+        strcmp(name, "process_scroll_wheel_events") == 0) {
+        uint64_t scrollSequence = __atomic_add_fetch(
+            &xpc_scroll_trace_count, 1, __ATOMIC_RELAXED);
+        if (scrollSequence <= 512) {
+            char *scrollDescription = xpc_copy_description(message);
+            logf_("[vmmhook] SCROLL_XPC #%llu %s connection=%p message=%s",
+                  (unsigned long long)scrollSequence, operation, connection,
+                  scrollDescription ? scrollDescription : "?");
+            if (scrollDescription)
+                free(scrollDescription);
+        }
+    }
     uint64_t sequence;
     if (!should_trace_xpc(&sequence))
         return;
@@ -3194,6 +3215,47 @@ static int vmm_hv_vcpu_create(uint64_t *vcpu, void **exit_out, void *config) {
           rc, (unsigned long long)(vcpu ? *vcpu : 0));
     if (rc == 0 && vcpu && *vcpu < 64 && exit_out)
         vmm_vcpu_exits[*vcpu] = (vmm_hv_vcpu_exit_t *)*exit_out;
+
+    if (rc == 0 && vcpu && host_is_ipados14()) {
+        // Hypervisor 113 (Big Sur) leaves HCR_EL2.TIDCP enabled. That traps
+        // implementation-defined guest registers, including ASPSR_EL1,
+        // which newer VMAPPLE kernels use when returning to Rosetta guarded
+        // execution. Hypervisor 147 (Ventura) clears TIDCP on the same M1
+        // hardware and marks the general control bank dirty before the first
+        // run. Mirror that newer framework behavior in the aligned XNU 20
+        // shared context so hardware performs the guarded-state transition;
+        // software emulation cannot reproduce it.
+        typedef void *(*get_context_fn)(uint64_t);
+        static get_context_fn getContext;
+        static dispatch_once_t getContextOnce;
+        dispatch_once(&getContextOnce, ^{
+            getContext = (get_context_fn)dlsym(
+                RTLD_DEFAULT, "_hv_vcpu_get_context");
+        });
+        uint8_t *context = getContext ? getContext(*vcpu) : NULL;
+        if (context) {
+            // XNU 20 arm_guest_rw_context: controls.hcr_el2 at 0x668 and
+            // state_dirty at 0x700. These offsets are validated against the
+            // macOS 11.3 KDK-derived layout used by UTM Hypervisor:
+            // https://github.com/utmapp/Hypervisor/blob/c694e42468d2794b962714cdf76f180125e69f36/hv_kernel_structs_xnu_20.h
+            volatile uint64_t *hcr =
+                (volatile uint64_t *)(context + 0x668);
+            volatile uint64_t *stateDirty =
+                (volatile uint64_t *)(context + 0x700);
+            uint64_t value = __atomic_load_n(hcr, __ATOMIC_ACQUIRE);
+            value &= ~(UINT64_C(1) << 20); // HCR_EL2.TIDCP
+            value |= UINT64_C(1) << 19;    // HCR_EL2.TSC, as Ventura does
+            __atomic_store_n(hcr, value, __ATOMIC_RELEASE);
+            __atomic_fetch_or(stateDirty, UINT64_C(4), __ATOMIC_ACQ_REL);
+            logf_("[iPadOS14] enabled native implementation-defined guest "
+                  "registers vcpu=%llu hcr=0x%llx",
+                  (unsigned long long)*vcpu,
+                  (unsigned long long)value);
+        } else {
+            logf_("[iPadOS14] unable to access vCPU context for native "
+                  "implementation-defined registers");
+        }
+    }
     return rc;
 }
 __attribute__((used)) static struct { const void *replacement; const void *replacee; }
@@ -3252,7 +3314,7 @@ static int vmm_hv_vcpu_run(uint64_t vcpu) {
               &vmm_vcpu_exit_counts[vcpu], runtime_vcpu_trace_limit)
         : 0;
     vmm_hv_vcpu_exit_t *exit = vcpu < 64 ? vmm_vcpu_exits[vcpu] : NULL;
-    if (runtime_debug_logging && vcpu < 64 && exit) {
+    if (runtime_debug_logging && exit_count && vcpu < 64 && exit) {
         uint32_t reason_bucket = exit->reason < 3 ? exit->reason : 3;
         __atomic_add_fetch(
             &vmm_vcpu_exit_reason_counts[vcpu][reason_bucket], 1,
@@ -3306,8 +3368,7 @@ static int vmm_hv_vcpu_set_vtimer_mask(uint64_t vcpu, bool masked) {
     if (runtime_debug_logging && vcpu < 64) {
         __atomic_store_n(&vmm_vtimer_last_mask[vcpu], masked,
                          __ATOMIC_RELAXED);
-        count = __atomic_add_fetch(&vmm_vtimer_mask_calls[vcpu], 1,
-                                   __ATOMIC_RELAXED);
+        count = diagnostic_sequence(&vmm_vtimer_mask_calls[vcpu], 12);
     }
     if ((runtime_debug_logging && count &&
          (count <= 12 || count % 1000000 == 0)) || rc != 0)
@@ -3329,8 +3390,7 @@ static int vmm_hv_vcpu_set_vtimer_offset(uint64_t vcpu, uint64_t offset) {
     if (runtime_debug_logging && vcpu < 64) {
         __atomic_store_n(&vmm_vtimer_last_offset[vcpu], offset,
                          __ATOMIC_RELAXED);
-        count = __atomic_add_fetch(&vmm_vtimer_offset_calls[vcpu], 1,
-                                   __ATOMIC_RELAXED);
+        count = diagnostic_sequence(&vmm_vtimer_offset_calls[vcpu], 12);
     }
     if ((runtime_debug_logging && count &&
          (count <= 12 || count % 1000000 == 0)) || rc != 0)
@@ -3349,7 +3409,7 @@ extern int hv_vcpus_exit(uint64_t *vcpus, uint32_t vcpu_count);
 static int vmm_hv_vcpus_exit(uint64_t *vcpus, uint32_t vcpu_count) {
     int rc = hv_vcpus_exit(vcpus, vcpu_count);
     uint64_t count = runtime_debug_logging
-        ? __atomic_add_fetch(&vmm_vcpus_exit_calls, 1, __ATOMIC_RELAXED)
+        ? diagnostic_sequence(&vmm_vcpus_exit_calls, 12)
         : 0;
     if ((runtime_debug_logging &&
          (count <= 12 || count % 100000 == 0)) || rc != 0)
