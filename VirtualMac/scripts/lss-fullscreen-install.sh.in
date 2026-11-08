@@ -1,0 +1,214 @@
+#!/bin/sh
+# 在已有的 Virtual Mac 上声明"仅全屏使用"，关掉 iPadOS 顶部的多任务三个点
+# （全屏 / 分屏 / 侧拉菜单），避免指针或手指碰到顶部时误触。
+#
+# 在设备上于本目录执行：
+#
+#     sh install-on-ipad.sh
+#
+# 回滚：
+#
+#     sh install-on-ipad.sh restore
+#
+# 无根越狱（Dopamine，/var/jb）与有根越狱（Taurine，/Applications）都会自动识别。
+# 脚本不 respring；装完请从主屏幕启动应用，若三个点仍在则重启一次设备。
+
+set -eu
+
+MAIN_CDHASH="@MAIN_CDHASH@"
+EXPECTED_BINARY_SIZE="@EXPECTED_BINARY_SIZE@"
+
+directory="$(cd "$(dirname "$0")" && pwd)"
+
+if test -d /var/jb; then
+    prefix=/var/jb
+    app=/var/jb/Applications/VirtualMac.app
+else
+    prefix=""
+    app=/Applications/VirtualMac.app
+fi
+# 仅用于本机空跑测试；设备上不要设置这两个变量。
+app="${VIRTUALMAC_TEST_APP_DIR:-$app}"
+prefix="${VIRTUALMAC_TEST_PREFIX:-$prefix}"
+
+test -d "$app" || { echo "未找到 Virtual Mac.app：$app" >&2; exit 1; }
+test -f "$app/Info.plist" || { echo "缺少 $app/Info.plist" >&2; exit 1; }
+test -w "$app" || { echo "没有写权限：$app（请以 root 身份运行本脚本）" >&2; exit 1; }
+
+latest_backup() {
+    latest=""
+    for candidate in "$app"/LockScreenFullScreenBackup-*; do
+        test -d "$candidate" || continue
+        latest="$candidate"
+    done
+    printf '%s\n' "$latest"
+}
+
+if test "${1:-}" = restore; then
+    backup="$(latest_backup)"
+    test -n "$backup" || {
+        echo "没有找到 LockScreenFullScreenBackup-* 备份目录" >&2
+        exit 1
+    }
+    cp -p "$backup/Info.plist" "$app/Info.plist.virtualmac-new"
+    chmod 644 "$app/Info.plist.virtualmac-new"
+    chown 0:0 "$app/Info.plist.virtualmac-new" 2>/dev/null || true
+    mv -f "$app/Info.plist.virtualmac-new" "$app/Info.plist"
+    if test -f "$backup/VirtualMac"; then
+        cp -p "$backup/VirtualMac" "$app/VirtualMac.virtualmac-new"
+        chmod 755 "$app/VirtualMac.virtualmac-new"
+        chown 0:0 "$app/VirtualMac.virtualmac-new" 2>/dev/null || true
+        mv -f "$app/VirtualMac.virtualmac-new" "$app/VirtualMac"
+    fi
+    if test -x "$prefix/usr/bin/uicache"; then
+        "$prefix/usr/bin/uicache" -p "$app" >/dev/null 2>&1 || true
+    fi
+    echo "已从 $backup 回滚 Info.plist（以及当时备份的主二进制）。"
+    echo "请从主屏幕重新启动 Virtual Mac。"
+    echo "若主二进制也被替换过且启动报 EAUTH，请重装原来的 deb 以恢复其 CDHash 注册。"
+    exit 0
+fi
+
+# 读取 Info.plist 的状态：true / missing / other / binary。
+plist_state() {
+    first=""
+    IFS= read -r first < "$1" || true
+    case "$first" in
+        '<?xml'*) ;;
+        *) printf '%s\n' binary; return 0 ;;
+    esac
+    found=0
+    while IFS= read -r line || test -n "$line"; do
+        case "$line" in
+            *'<key>UIRequiresFullScreen</key>'*) found=1; continue ;;
+        esac
+        if test "$found" = 1; then
+            case "$line" in
+                *'<true/>'*) printf '%s\n' true; return 0 ;;
+                *) printf '%s\n' other; return 0 ;;
+            esac
+        fi
+    done < "$1"
+    printf '%s\n' missing
+}
+
+state="$(plist_state "$app/Info.plist")"
+case "$state" in
+    true) needs_plist=0 ;;
+    *) needs_plist=1 ;;
+esac
+
+# 主二进制只做"确认是同一版本"，大小一致就不动它；这样不会改变现有行为。
+installed_size=""
+if test -f "$app/VirtualMac"; then
+    # shellcheck disable=SC2046
+    set -- $(ls -l "$app/VirtualMac")
+    installed_size="${5:-}"
+fi
+if test "$installed_size" = "$EXPECTED_BINARY_SIZE"; then
+    needs_binary=0
+else
+    needs_binary=1
+fi
+
+uicache_refresh() {
+    if test -x "$prefix/usr/bin/uicache" &&
+        "$prefix/usr/bin/uicache" -p "$app" >/dev/null 2>&1; then
+        echo "已执行 uicache，让 SpringBoard 重新读取应用信息。"
+    else
+        echo "提示：未执行 uicache（或执行失败），重启一次设备也能让系统重新读取 Info.plist。"
+    fi
+}
+
+if test "$needs_plist" = 0 && test "$needs_binary" = 0; then
+    echo "设备上的 Info.plist 已声明 UIRequiresFullScreen=true，且主二进制已是当前版本。"
+    echo "没有需要修改的内容。"
+    uicache_refresh
+    echo ""
+    echo "如果顶部三个点仍然出现，重启一次 iPad 即可让 SpringBoard 重新读取场景声明。"
+    exit 0
+fi
+
+# 只有真正要改文件时才创建备份，这样 restore 永远回到"第一次修改之前"的状态。
+backup="$app/LockScreenFullScreenBackup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+cp -p "$app/Info.plist" "$backup/Info.plist"
+if test -f "$app/VirtualMac"; then
+    cp -p "$app/VirtualMac" "$backup/VirtualMac"
+fi
+echo "已备份原有 Info.plist（和主二进制）到 $backup"
+
+replace_plist() {
+    chmod 644 "$app/Info.plist.virtualmac-new"
+    chown 0:0 "$app/Info.plist.virtualmac-new" 2>/dev/null || true
+    mv -f "$app/Info.plist.virtualmac-new" "$app/Info.plist"
+}
+
+if test "$needs_plist" = 1; then
+    case "$state" in
+        missing)
+            content="$(cat "$app/Info.plist")"
+            suffix='</dict>
+</plist>'
+            case "$content" in
+                *"$suffix") ;;
+                *)
+                    echo "无法识别 Info.plist 的结尾结构，未做修改。" >&2
+                    exit 1
+                    ;;
+            esac
+            body="${content%"$suffix"}"
+            printf '%s\n' "${body}  <key>UIRequiresFullScreen</key>
+  <true/>
+</dict>
+</plist>" > "$app/Info.plist.virtualmac-new"
+            replace_plist
+            echo "已在设备现有 Info.plist 中加入 UIRequiresFullScreen=true（其它键原样保留）。"
+            ;;
+        other)
+            echo "Info.plist 中的 UIRequiresFullScreen 不是 <true/>，用本包完整 Info.plist 覆盖。" >&2
+            cp "$directory/Info.plist" "$app/Info.plist.virtualmac-new"
+            replace_plist
+            ;;
+        binary)
+            echo "设备上的 Info.plist 是二进制格式，用本包内的完整 XML Info.plist 覆盖。"
+            cp "$directory/Info.plist" "$app/Info.plist.virtualmac-new"
+            replace_plist
+            ;;
+    esac
+    verify="$(plist_state "$app/Info.plist")"
+    if test "$verify" != true; then
+        echo "写入后校验失败，正在恢复备份 Info.plist。" >&2
+        cp -p "$backup/Info.plist" "$app/Info.plist.virtualmac-new"
+        replace_plist
+        exit 1
+    fi
+fi
+
+if test "$needs_binary" = 1; then
+    echo "主二进制大小（${installed_size:-文件缺失}）与当前版本（$EXPECTED_BINARY_SIZE 字节）不同，替换为包内二进制。"
+    cp "$directory/VirtualMac" "$app/VirtualMac.virtualmac-new"
+    chmod 755 "$app/VirtualMac.virtualmac-new"
+    chown 0:0 "$app/VirtualMac.virtualmac-new" 2>/dev/null || true
+    mv -f "$app/VirtualMac.virtualmac-new" "$app/VirtualMac"
+    if test -x "$prefix/usr/bin/jbctl"; then
+        "$prefix/usr/bin/jbctl" trustcache add "$MAIN_CDHASH"
+        echo "已用 jbctl 注册主二进制 CDHash"
+    elif test -x /taurine/jbexec; then
+        PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+            "$app/VirtualMac" >/dev/null || true
+        echo "已用 jbexec 预检主二进制"
+    else
+        echo "警告：未找到 jbctl 或 jbexec，请手动注册 CDHash：" >&2
+        echo "  $MAIN_CDHASH" >&2
+    fi
+else
+    echo "主二进制已是当前版本（$EXPECTED_BINARY_SIZE 字节），跳过替换，无需注册 CDHash。"
+fi
+
+uicache_refresh
+echo ""
+echo "安装完成。接下来："
+echo "  1) 如果 Virtual Mac 正开着，先完全关闭，再从主屏幕重新启动；"
+echo "  2) 若顶部三个点仍然出现，重启一次 iPad 后再试（SpringBoard 需要重新读取应用的场景声明）。"
+echo "回滚：在设备上于本目录执行  sh install-on-ipad.sh restore"
