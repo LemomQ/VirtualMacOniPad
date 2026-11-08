@@ -15,6 +15,10 @@ typedef void (*VZTrackpadScrollEmitter)(CGVector rawDelta,
 // All entry points and the emitter run on the main thread.
 void VZTrackpadScrollBridgeConfigure(VZTrackpadScrollEmitter emitter,
                                      void * _Nullable context);
+// Presentation speed multiplier for trackpad scrolling. 1.0 keeps the
+// reconstructed Ventura curve; lower values move the guest content less for
+// the same finger travel, which suits a small Magic Keyboard trackpad.
+void VZTrackpadScrollBridgeSetOutputScale(double scale);
 void VZTrackpadScrollBridgeHandle(CGVector rawDelta,
                                   NSUInteger phase,
                                   CFTimeInterval timestamp);

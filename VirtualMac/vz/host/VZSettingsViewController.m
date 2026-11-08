@@ -233,7 +233,7 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
     (void)tableView;
-    return section == 0 ? 4 : section == 1 ? 6 : section == 2 ? 4 :
+    return section == 0 ? 4 : section == 1 ? 7 : section == 2 ? 4 :
         section == 3 ? 3 : section == 4 ? 3 : section == 5 ? 2 :
         section == 6 ? 1 : 4;
 }
@@ -372,6 +372,19 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
         [toggle addTarget:self action:@selector(inputToggleChanged:)
             forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = toggle;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if (indexPath.section == 1 && indexPath.row == 6) {
+        cell.textLabel.text = VZL(@"Trackpad Scrolling Speed");
+        UISlider *slider = [[[UISlider alloc] initWithFrame:
+            CGRectMake(0, 0, 180, 32)] autorelease];
+        slider.minimumValue = 0.1;
+        slider.maximumValue = 1.0;
+        slider.value = [[settings stringForKey:VZTrackpadScrollingSpeedKey]
+            floatValue];
+        [slider addTarget:self
+            action:@selector(trackpadScrollingSpeedChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = slider;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if (indexPath.section == 1) {
         cell.textLabel.text = VZL(@"Scrolling Speed");
@@ -571,6 +584,13 @@ static NSString *VZSettingsFittingTitle(UITableView *tableView,
     [VZAppSettings.sharedSettings setString:
         [NSString stringWithFormat:@"%.2f", sender.value]
         forKey:VZScrollingSpeedKey];
+}
+
+- (void)trackpadScrollingSpeedChanged:(UISlider *)sender
+{
+    [VZAppSettings.sharedSettings setString:
+        [NSString stringWithFormat:@"%.2f", sender.value]
+        forKey:VZTrackpadScrollingSpeedKey];
 }
 
 - (void)chooseHUDVisibilityFrom:(UITableViewCell *)cell

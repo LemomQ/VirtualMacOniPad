@@ -51,6 +51,7 @@ typedef struct {
     CGVector momentumVelocity;
     CGVector momentumRemainder;
     double momentumStartTime;
+    double momentumLastTickTime;
     BOOL momentumDidBegin;
     uint64_t momentumGeneration;
     BOOL activeGesture;
@@ -60,6 +61,12 @@ typedef struct {
     CGVector lastSourceRaw;
     NSUInteger lastSourcePhase;
     CGVector sourceRemainder;
+    // Presentation scale applied only to the injected deltas. The internal
+    // velocity estimate, the momentum thresholds, and the momentum integral
+    // all keep the device's own mickey scale, so a light flick still starts
+    // momentum when the user lowers the scrolling speed.
+    double outputScale;
+    CGVector outputRemainder;
 } VZMacScrollPipeline;
 
 static VZMacScrollPipeline gTrackpadPipeline;
@@ -180,15 +187,61 @@ static CGVector integralRawDelta(VZMacScrollPipeline *pipeline, CGVector raw)
         integralMickeys(raw.dy, &pipeline->sourceRemainder.dy));
 }
 
-static void emit(VZMacScrollPipeline *pipeline, CGVector raw,
-                 NSUInteger phase, NSUInteger momentumPhase, double timestamp)
+// Scale a displacement into the presentation units the guest scrolls by.
+// Multiplying before the integral keeps the fractional part in a remainder, so
+// a low speed setting cannot round a slow scroll down to nothing.
+static double scaledOutputMickeys(double value, double scale,
+                                  double *remainder)
+{
+    if (value != 0 && *remainder * value < 0)
+        *remainder = 0;
+    double accumulated = value * scale + *remainder;
+    double integral = trunc(accumulated);
+    *remainder = accumulated - integral;
+    return integral;
+}
+
+static CGVector scaledOutputDelta(VZMacScrollPipeline *pipeline, CGVector raw)
+{
+    return CGVectorMake(
+        scaledOutputMickeys(raw.dx, pipeline->outputScale,
+                            &pipeline->outputRemainder.dx),
+        scaledOutputMickeys(raw.dy, pipeline->outputScale,
+                            &pipeline->outputRemainder.dy));
+}
+
+// Lifecycle packets carry no displacement and must always reach the guest:
+// dropping a began or an ended would leave AppKit and WebKit mid-gesture.
+static void emitLifecycle(VZMacScrollPipeline *pipeline, NSUInteger phase,
+                          NSUInteger momentumPhase)
 {
     if (!pipeline->emitter)
         return;
+    pipeline->emitter(CGVectorMake(0, 0), CGVectorMake(0, 0), phase,
+                      momentumPhase, pipeline->emitterContext);
+}
+
+// Returns NO when the speed scale reduced this packet to zero displacement.
+// The remainder is kept, so the movement is delivered by a later packet
+// instead of being lost.
+static BOOL emitDelta(VZMacScrollPipeline *pipeline, CGVector raw,
+                      NSUInteger phase, NSUInteger momentumPhase,
+                      double timestamp)
+{
+    if (!pipeline->emitter)
+        return NO;
     CGVector accelerated = acceleratedDelta(pipeline, raw, timestamp,
                                             momentumPhase != 0);
-    pipeline->emitter(raw, accelerated, phase, momentumPhase,
+    CGVector outputRaw = scaledOutputDelta(pipeline, raw);
+    CGVector outputAccelerated = CGVectorMake(
+        accelerated.dx * pipeline->outputScale,
+        accelerated.dy * pipeline->outputScale);
+    if (outputRaw.dx == 0 && outputRaw.dy == 0 &&
+        outputAccelerated.dx == 0 && outputAccelerated.dy == 0)
+        return NO;
+    pipeline->emitter(outputRaw, outputAccelerated, phase, momentumPhase,
                       pipeline->emitterContext);
+    return YES;
 }
 
 static void stopMomentum(VZMacScrollPipeline *pipeline, BOOL emitEnd)
@@ -202,23 +255,36 @@ static void stopMomentum(VZMacScrollPipeline *pipeline, BOOL emitEnd)
         dispatch_release(pipeline->momentumTimer);
         pipeline->momentumTimer = NULL;
     }
-    if (emitEnd && pipeline->momentumDidBegin && pipeline->emitter) {
-        pipeline->emitter(CGVectorMake(0, 0), CGVectorMake(0, 0), 0,
-                          VZScrollPhaseEnded, pipeline->emitterContext);
-    }
+    if (emitEnd && pipeline->momentumDidBegin)
+        emitLifecycle(pipeline, 0, VZScrollPhaseEnded);
     pipeline->momentumDidBegin = NO;
     pipeline->momentumVelocity = CGVectorMake(0, 0);
     pipeline->momentumRemainder = CGVectorMake(0, 0);
+    pipeline->momentumLastTickTime = 0;
 }
 
-static double momentumAlpha(CGVector velocity)
+// MultitouchHID advances its momentum history one 8 ms decay step per timer
+// firing. A dispatch source on the main queue coalesces firings whenever the
+// queue is busy, so the tick must derive both its decay and its travel from
+// the real elapsed time. Advancing a fixed step per firing instead silently
+// drops travel exactly when the main thread is busy injecting scroll deltas,
+// which the guest shows as a stuttering momentum tail.
+static const double kMomentumDecayInterval = 0.008;
+static const double kMomentumMaximumStep = 0.25;
+
+static double momentumBase(CGVector velocity)
 {
     const double interval = 1.0 / 60.0;
     double speed = hypot(velocity.dx, velocity.dy) / interval;
     double base = 0.975;
     if (speed < 250.0)
         base -= ((250.0 - MAX(0.0, speed)) / 250.0) * 0.065;
-    return pow(base, interval / 0.008);
+    return base;
+}
+
+static double momentumAlpha(double base, double elapsed)
+{
+    return pow(base, elapsed / kMomentumDecayInterval);
 }
 
 static double roundedDelta(double value, double *remainder)
@@ -232,22 +298,38 @@ static double roundedDelta(double value, double *remainder)
 static void momentumTick(VZMacScrollPipeline *pipeline)
 {
     double now = CACurrentMediaTime();
-    double alpha = momentumAlpha(pipeline->momentumVelocity);
+    double elapsed = pipeline->momentumLastTickTime > 0
+        ? now - pipeline->momentumLastTickTime : 1.0 / 60.0;
+    if (elapsed <= 0)
+        elapsed = 1.0 / 60.0;
+    // A stopped or suspended app must not replay an arbitrarily long decay in
+    // one packet; the 2.2 s expiry below closes the sequence instead.
+    elapsed = MIN(elapsed, kMomentumMaximumStep);
+    pipeline->momentumLastTickTime = now;
+    double base = momentumBase(pipeline->momentumVelocity);
+    double alpha = momentumAlpha(base, elapsed);
+    // momentumVelocity is stored per 60 Hz frame. Integrating the exponential
+    // decay over the real interval keeps the total travel independent of how
+    // many timer firings were coalesced: distance = v * (1 - e^-kt) / k.
+    double decayPerSecond = -log(base) / kMomentumDecayInterval;
+    double scale = decayPerSecond > 0.0
+        ? 60.0 * (1.0 - alpha) / decayPerSecond
+        : elapsed * 60.0;
+    CGVector step = CGVectorMake(pipeline->momentumVelocity.dx * scale,
+                                 pipeline->momentumVelocity.dy * scale);
     pipeline->momentumVelocity.dx *= alpha;
     pipeline->momentumVelocity.dy *= alpha;
     CGVector raw = CGVectorMake(
-        roundedDelta(pipeline->momentumVelocity.dx,
-                     &pipeline->momentumRemainder.dx),
-        roundedDelta(pipeline->momentumVelocity.dy,
-                     &pipeline->momentumRemainder.dy));
+        roundedDelta(step.dx, &pipeline->momentumRemainder.dx),
+        roundedDelta(step.dy, &pipeline->momentumRemainder.dy));
     BOOL expired = now - pipeline->momentumStartTime >= 2.2;
     BOOL stopped = fabs(pipeline->momentumVelocity.dx) < 0.5 &&
         fabs(pipeline->momentumVelocity.dy) < 0.5;
     if ((raw.dx != 0 || raw.dy != 0) && !expired) {
-        emit(pipeline, raw, 0,
-             pipeline->momentumDidBegin ? VZScrollPhaseChanged
-                                        : VZScrollPhaseBegan, now);
-        pipeline->momentumDidBegin = YES;
+        if (emitDelta(pipeline, raw, 0,
+                      pipeline->momentumDidBegin ? VZScrollPhaseChanged
+                                                 : VZScrollPhaseBegan, now))
+            pipeline->momentumDidBegin = YES;
     }
     if (expired || stopped)
         stopMomentum(pipeline, YES);
@@ -284,6 +366,7 @@ static void beginMomentum(VZMacScrollPipeline *pipeline, double timestamp)
                                              velocity.dy * scale);
     pipeline->momentumRemainder = CGVectorMake(0, 0);
     pipeline->momentumStartTime = timestamp;
+    pipeline->momentumLastTickTime = timestamp;
     pipeline->momentumDidBegin = NO;
     uint64_t generation = ++pipeline->momentumGeneration;
 
@@ -343,6 +426,12 @@ static void updateVelocity(VZMacScrollPipeline *pipeline,
 static void resetPipeline(VZMacScrollPipeline *pipeline)
 {
     stopMomentum(pipeline, NO);
+    // outputScale is a configuration value, not run state: keep whatever the
+    // caller selected and only seed the default for a pipeline that never had
+    // one. Resetting it here would silently undo the user's speed setting on
+    // every pointer-session reset.
+    if (!(pipeline->outputScale > 0.0))
+        pipeline->outputScale = 1.0;
     resetAxis(&pipeline->acceleratorX);
     resetAxis(&pipeline->acceleratorY);
     pipeline->activeGesture = NO;
@@ -352,6 +441,7 @@ static void resetPipeline(VZMacScrollPipeline *pipeline)
     pipeline->lastSourceRaw = CGVectorMake(0, 0);
     pipeline->lastSourcePhase = 0;
     pipeline->sourceRemainder = CGVectorMake(0, 0);
+    pipeline->outputRemainder = CGVectorMake(0, 0);
     pipeline->filteredVelocity = CGVectorMake(0, 0);
     pipeline->gestureStartTime = 0;
     pipeline->lastInputTime = 0;
@@ -381,10 +471,7 @@ static void handlePipeline(VZMacScrollPipeline *pipeline, CGVector rawDelta,
             return;
         pipeline->contactMayBegin = YES;
         stopMomentum(pipeline, YES);
-        if (pipeline->emitter)
-            pipeline->emitter(CGVectorMake(0, 0), CGVectorMake(0, 0),
-                              VZScrollPhaseMayBegin, 0,
-                              pipeline->emitterContext);
+        emitLifecycle(pipeline, VZScrollPhaseMayBegin, 0);
         return;
     }
     if (phase == VZScrollPhaseBegan) {
@@ -427,13 +514,12 @@ static void handlePipeline(VZMacScrollPipeline *pipeline, CGVector rawDelta,
         updateVelocity(pipeline, integralRaw, timestamp);
         NSUInteger emittedPhase = pipeline->activeDidBegin
             ? VZScrollPhaseChanged : VZScrollPhaseBegan;
-        emit(pipeline, integralRaw, emittedPhase, 0, timestamp);
-        pipeline->activeDidBegin = YES;
+        if (emitDelta(pipeline, integralRaw, emittedPhase, 0, timestamp))
+            pipeline->activeDidBegin = YES;
     } else if (phase == VZScrollPhaseEnded ||
                phase == VZScrollPhaseCancelled) {
-        if (pipeline->activeDidBegin && pipeline->emitter)
-            pipeline->emitter(CGVectorMake(0, 0), CGVectorMake(0, 0),
-                              phase, 0, pipeline->emitterContext);
+        if (pipeline->activeDidBegin)
+            emitLifecycle(pipeline, phase, 0);
         pipeline->activeGesture = NO;
         pipeline->activeDidBegin = NO;
         pipeline->contactMayBegin = NO;
@@ -452,6 +538,18 @@ void VZTrackpadScrollBridgeConfigure(VZTrackpadScrollEmitter emitter,
     gTrackpadPipeline.emitter = emitter;
     gTrackpadPipeline.emitterContext = context;
     resetPipeline(&gTrackpadPipeline);
+}
+
+// Presentation speed multiplier for the trackpad pipeline. 1.0 keeps the
+// Ventura curve untouched; lower values move the guest content less for the
+// same finger travel, which is what a small Magic Keyboard trackpad needs.
+void VZTrackpadScrollBridgeSetOutputScale(double scale)
+{
+    NSCAssert(NSThread.isMainThread, @"trackpad bridge must use main thread");
+    if (!(scale > 0.0))
+        scale = 1.0;
+    gTrackpadPipeline.outputScale = MIN(4.0, scale);
+    gTrackpadPipeline.outputRemainder = CGVectorMake(0, 0);
 }
 
 void VZTrackpadScrollBridgeHandle(CGVector rawDelta,

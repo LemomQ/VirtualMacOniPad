@@ -73,6 +73,12 @@
   <true/>
   <key>UIFileSharingEnabled</key>
   <true/>
+  <!-- Opt out of iPad multitasking. On iPadOS 18 and earlier this keeps the
+       scene full screen, prevents Split View and Slide Over entirely, and the
+       system therefore does not show the top multitasking ("three dots")
+       affordance that a multitasking-capable app gets. -->
+  <key>UIRequiresFullScreen</key>
+  <true/>
   <key>UISupportedInterfaceOrientations~ipad</key>
   <array>
     <string>UIInterfaceOrientationPortrait</string>

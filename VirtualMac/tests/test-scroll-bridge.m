@@ -184,6 +184,108 @@ static void testDuplicateContactIsSuppressed(void)
     NSCAssert(eventCount == 1, @"duplicate may-begin reached the guest");
 }
 
+// The momentum timer is a main-queue dispatch source. Whenever the main thread
+// is busy - which is exactly what happens while scroll deltas are injected -
+// dispatch coalesces its firings, so each tick must integrate the interval that
+// really elapsed. Advancing one fixed step per firing instead leaves a hole in
+// the momentum stream that the guest shows as stutter.
+static void testStalledMomentumIntegratesElapsedTime(void)
+{
+    resetCapture();
+    double t = CACurrentMediaTime();
+    VZTrackpadScrollBridgeHandle(CGVectorMake(20, 0), 1, t);
+    VZTrackpadScrollBridgeHandle(CGVectorMake(60, 0), 4, t + 0.008);
+    VZTrackpadScrollBridgeHandle(CGVectorMake(80, 0), 4, t + 0.016);
+    VZTrackpadScrollBridgeHandle(CGVectorMake(0, 0), 8, t + 0.024);
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.05];
+    while ([deadline timeIntervalSinceNow] > 0)
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
+                               beforeDate:deadline];
+    double beforeStall = 0;
+    for (NSUInteger index = eventCount; index > 0; index--) {
+        if (events[index - 1].momentumPhase == 0)
+            continue;
+        beforeStall = fabs(events[index - 1].raw.dx);
+        break;
+    }
+    NSCAssert(beforeStall > 0, @"flick produced no momentum to stall");
+    NSUInteger stalledAt = eventCount;
+
+    // Blocking the main thread stops every dispatch source on the main queue,
+    // so the next tick has to cover the whole sleep.
+    [NSThread sleepForTimeInterval:0.2];
+
+    deadline = [NSDate dateWithTimeIntervalSinceNow:0.05];
+    while ([deadline timeIntervalSinceNow] > 0)
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode
+                               beforeDate:deadline];
+    double catchUp = 0;
+    for (NSUInteger index = stalledAt; index < eventCount; index++) {
+        if (events[index].momentumPhase == 0)
+            continue;
+        catchUp = fabs(events[index].raw.dx);
+        break;
+    }
+    NSCAssert(catchUp > 2.0 * beforeStall,
+              @"stalled momentum tick ignored the elapsed interval "
+              @"(before=%.2f catch-up=%.2f)", beforeStall, catchUp);
+}
+
+// The speed multiplier changes presentation only: the same finger travel must
+// move the guest content proportionally less without changing any of the
+// bridge's internal velocity or momentum state.
+static void testOutputScaleScalesTravel(void)
+{
+    double fullTravel = 0;
+    double halfTravel = 0;
+    for (NSUInteger pass = 0; pass < 2; pass++) {
+        resetCapture();
+        VZTrackpadScrollBridgeSetOutputScale(pass == 0 ? 1.0 : 0.5);
+        double t = CACurrentMediaTime();
+        VZTrackpadScrollBridgeHandle(CGVectorMake(40, 0), 1, t);
+        VZTrackpadScrollBridgeHandle(CGVectorMake(40, 0), 4, t + 0.008);
+        VZTrackpadScrollBridgeHandle(CGVectorMake(40, 0), 4, t + 0.016);
+        double travel = 0;
+        for (NSUInteger index = 0; index < eventCount; index++)
+            travel += events[index].raw.dx;
+        if (pass == 0)
+            fullTravel = travel;
+        else
+            halfTravel = travel;
+    }
+    VZTrackpadScrollBridgeSetOutputScale(1.0);
+    NSCAssert(fullTravel > 100, @"baseline travel missing: %.1f", fullTravel);
+    NSCAssert(halfTravel > 0.45 * fullTravel &&
+              halfTravel < 0.55 * fullTravel,
+              @"output scale did not scale travel (full=%.1f half=%.1f)",
+              fullTravel, halfTravel);
+}
+
+// A low multiplier must not round a slow scroll down to nothing, and it must
+// never swallow the gesture lifecycle packets.
+static void testOutputScaleKeepsSlowTravelAndEnd(void)
+{
+    resetCapture();
+    VZTrackpadScrollBridgeSetOutputScale(0.3);
+    double t = CACurrentMediaTime();
+    VZTrackpadScrollBridgeHandle(CGVectorMake(1, 0), 1, t);
+    for (NSUInteger index = 1; index <= 20; index++)
+        VZTrackpadScrollBridgeHandle(CGVectorMake(1, 0), 4,
+                                     t + index * 0.008);
+    VZTrackpadScrollBridgeHandle(CGVectorMake(0, 0), 8, t + 0.2);
+    double travel = 0;
+    BOOL sawEnd = NO;
+    for (NSUInteger index = 0; index < eventCount; index++) {
+        travel += events[index].raw.dx;
+        sawEnd |= events[index].phase == 8;
+    }
+    VZTrackpadScrollBridgeSetOutputScale(1.0);
+    NSCAssert(travel >= 5.0 && travel <= 7.0,
+              @"slow travel was rounded away: %.1f", travel);
+    NSCAssert(sawEnd, @"scaled pipeline dropped the gesture end");
+}
+
 static void testSlowReleaseHasNoMomentum(void)
 {
     resetCapture();
@@ -224,6 +326,9 @@ int main(void)
         testPauseAndReverse();
         testFractionalPauseAndReverse();
         testSlowReleaseHasNoMomentum();
+        testStalledMomentumIntegratesElapsedTime();
+        testOutputScaleScalesTravel();
+        testOutputScaleKeepsSlowTravelAndEnd();
         testFlickStartsMomentum();
         testContactStopsMomentum();
         testLightContactStopsMomentum();
