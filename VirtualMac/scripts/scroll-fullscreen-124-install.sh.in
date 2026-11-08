@@ -1,0 +1,207 @@
+#!/bin/sh
+# Virtual Mac 1.2.4 测试替换包：鼠标滚轮/触控板修复 + 全屏声明（去掉顶部三个点）
+#
+# 在设备上于本目录执行：
+#
+#     sh install-on-ipad.sh
+#
+# 回滚到安装前：
+#
+#     sh install-on-ipad.sh restore
+#
+# 无根越狱（Dopamine，/var/jb）与有根越狱（Taurine，/Applications）都会自动识别。
+# 脚本不会 respring；装完请从主屏幕重新启动 Virtual Mac。
+
+set -eu
+
+MAIN_CDHASH="@MAIN_CDHASH@"
+EXPECTED_BINARY_SIZE="@EXPECTED_BINARY_SIZE@"
+EXPECTED_GUESTTOOLS_SIZE="@EXPECTED_GUESTTOOLS_SIZE@"
+PACKAGE_VERSION="1.2.4"
+
+directory="$(cd "$(dirname "$0")" && pwd)"
+
+if test -d /var/jb; then
+    prefix=/var/jb
+    app=/var/jb/Applications/VirtualMac.app
+else
+    prefix=""
+    app=/Applications/VirtualMac.app
+fi
+# 仅用于本机空跑测试；设备上不要设置这两个变量。
+app="${VIRTUALMAC_TEST_APP_DIR:-$app}"
+prefix="${VIRTUALMAC_TEST_PREFIX:-$prefix}"
+
+die() { echo "错误：$*" >&2; exit 1; }
+
+test -d "$app" || die "未找到 Virtual Mac.app：$app"
+test -f "$app/Info.plist" || die "缺少 $app/Info.plist"
+test -w "$app" || die "没有写权限：$app（请以 root 身份运行本脚本）"
+
+file_size() {
+    if test -f "$1"; then
+        # shellcheck disable=SC2046
+        set -- $(ls -l "$1")
+        printf '%s\n' "${5:-0}"
+    else
+        printf '0\n'
+    fi
+}
+
+latest_backup() {
+    latest=""
+    for candidate in "$app"/VirtualMac124Backup-*; do
+        test -d "$candidate" || continue
+        latest="$candidate"
+    done
+    printf '%s\n' "$latest"
+}
+
+replace_file() {
+    source_file="$1"
+    destination_file="$2"
+    mode="$3"
+    cp "$source_file" "$destination_file.virtualmac-new"
+    chmod "$mode" "$destination_file.virtualmac-new"
+    chown 0:0 "$destination_file.virtualmac-new" 2>/dev/null || true
+    mv -f "$destination_file.virtualmac-new" "$destination_file"
+}
+
+uicache_refresh() {
+    if test -x "$prefix/usr/bin/uicache" &&
+        "$prefix/usr/bin/uicache" -p "$app" >/dev/null 2>&1; then
+        echo "已执行 uicache，让 SpringBoard 重新读取应用信息。"
+    else
+        echo "提示：未执行 uicache（或执行失败），重启一次设备也能让系统重新读取 Info.plist。"
+    fi
+}
+
+if test "${1:-}" = restore; then
+    backup="$(latest_backup)"
+    test -n "$backup" || die "没有找到 VirtualMac124Backup-* 备份目录"
+    replace_file "$backup/VirtualMac" "$app/VirtualMac" 755
+    replace_file "$backup/Info.plist" "$app/Info.plist" 644
+    if test -f "$backup/VirtualMacGuestTools.tar.gz"; then
+        mkdir -p "$app/GuestTools"
+        replace_file "$backup/VirtualMacGuestTools.tar.gz" \
+            "$app/GuestTools/VirtualMacGuestTools.tar.gz" 644
+    fi
+    for saved in "$backup"/Localizations/*.lproj/Localizable.strings; do
+        test -f "$saved" || continue
+        language="$(basename "$(dirname "$saved")")"
+        mkdir -p "$app/$language"
+        replace_file "$saved" "$app/$language/Localizable.strings" 644
+    done
+    uicache_refresh
+    echo "已从 $backup 回滚到安装前的文件。"
+    echo "请从主屏幕重新启动 Virtual Mac。"
+    echo "若启动报 EAUTH，说明恢复后的二进制需要重新注册 CDHash，请重装原来的 deb。"
+    exit 0
+fi
+
+# 先判断设备上是不是已经是这个测试版本，避免重复备份。
+binary_size="$(file_size "$app/VirtualMac")"
+guesttools_size="$(file_size "$app/GuestTools/VirtualMacGuestTools.tar.gz")"
+version_ok=0
+fullscreen_ok=0
+if test -f "$app/Info.plist"; then
+    pending=""
+    while IFS= read -r line || test -n "$line"; do
+        case "$line" in
+            *'<key>CFBundleShortVersionString</key>'*)
+                pending=version
+                continue
+                ;;
+            *'<key>UIRequiresFullScreen</key>'*)
+                pending=fullscreen
+                continue
+                ;;
+        esac
+        if test -n "$pending"; then
+            case "$pending" in
+                version)
+                    case "$line" in
+                        *"$PACKAGE_VERSION"*) version_ok=1 ;;
+                    esac
+                    ;;
+                fullscreen)
+                    case "$line" in
+                        *'<true/>'*) fullscreen_ok=1 ;;
+                    esac
+                    ;;
+            esac
+            pending=""
+        fi
+    done <"$app/Info.plist"
+fi
+
+if test "$binary_size" = "$EXPECTED_BINARY_SIZE" &&
+    test "$guesttools_size" = "$EXPECTED_GUESTTOOLS_SIZE" &&
+    test "$version_ok" = 1 && test "$fullscreen_ok" = 1; then
+    echo "设备上已经是该测试版本（1.2.4 + 鼠标滚轮/触控板修复 + 全屏声明）。"
+    echo "没有需要修改的文件。"
+    uicache_refresh
+    exit 0
+fi
+
+# 只有真正要改文件时才创建备份，restore 永远回到第一次安装之前。
+backup="$app/VirtualMac124Backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup/Localizations"
+test -f "$app/VirtualMac" && cp -p "$app/VirtualMac" "$backup/VirtualMac"
+test -f "$app/Info.plist" && cp -p "$app/Info.plist" "$backup/Info.plist"
+if test -f "$app/GuestTools/VirtualMacGuestTools.tar.gz"; then
+    cp -p "$app/GuestTools/VirtualMacGuestTools.tar.gz" \
+        "$backup/VirtualMacGuestTools.tar.gz"
+fi
+for source in "$directory"/Localizations/*.lproj/Localizable.strings; do
+    test -f "$source" || continue
+    language="$(basename "$(dirname "$source")")"
+    if test -f "$app/$language/Localizable.strings"; then
+        mkdir -p "$backup/Localizations/$language"
+        cp -p "$app/$language/Localizable.strings" \
+            "$backup/Localizations/$language/Localizable.strings"
+    fi
+done
+echo "已备份原有文件到 $backup"
+
+replace_file "$directory/VirtualMac" "$app/VirtualMac" 755
+echo "已替换主二进制（1.2.4 + 滚动/触控板修复），CDHash 稍后注册。"
+
+replace_file "$directory/Info.plist" "$app/Info.plist" 644
+echo "已替换 Info.plist（1.2.4 + UIRequiresFullScreen=true）。"
+
+mkdir -p "$app/GuestTools"
+replace_file "$directory/GuestTools/VirtualMacGuestTools.tar.gz" \
+    "$app/GuestTools/VirtualMacGuestTools.tar.gz" 644
+echo "已替换 GuestTools 载荷（1.2.4）。"
+
+localization_count=0
+for source in "$directory"/Localizations/*.lproj/Localizable.strings; do
+    test -f "$source" || continue
+    language="$(basename "$(dirname "$source")")"
+    mkdir -p "$app/$language"
+    replace_file "$source" "$app/$language/Localizable.strings" 644
+    localization_count=$((localization_count + 1))
+done
+echo "已更新 $localization_count 个语言的本地化字符串。"
+
+if test -x "$prefix/usr/bin/jbctl"; then
+    "$prefix/usr/bin/jbctl" trustcache add "$MAIN_CDHASH"
+    echo "已用 jbctl 注册主二进制 CDHash。"
+elif test -x /taurine/jbexec; then
+    PREFLIGHT=1 /bin/bash -c 'exec -a "$1" /taurine/jbexec' _ \
+        "$app/VirtualMac" >/dev/null || true
+    echo "已用 jbexec 预检主二进制。"
+else
+    echo "警告：未找到 jbctl 或 jbexec，请手动注册 CDHash：" >&2
+    echo "  $MAIN_CDHASH" >&2
+fi
+
+uicache_refresh
+echo ""
+echo "安装完成（Virtual Mac 1.2.4：鼠标滚轮/触控板修复 + 全屏声明）。接下来："
+echo "  1) 如果 Virtual Mac 正开着，先完全关闭，再从主屏幕重新启动；"
+echo "  2) 顶部三个点应已消失；设置 → Touch 里应出现「触控板滚动速度」；"
+echo "  3) 新 GuestTools 载荷会在下次启动虚拟机时自动更新到 guest；"
+echo "  4) 若三个点仍在，重启一次 iPad（SpringBoard 重新读取场景声明）。"
+echo "回滚：在设备上于本目录执行  sh install-on-ipad.sh restore"
